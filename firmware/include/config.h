@@ -17,21 +17,25 @@ namespace cfg_detail {
 constexpr bool startsWith(const char* s, const char* prefix) {
   return *prefix == '\0' || (*s == *prefix && startsWith(s + 1, prefix + 1));
 }
+constexpr size_t length(const char* s) { return *s ? 1 + length(s + 1) : 0; }
 }  // namespace cfg_detail
 static_assert(cfg_detail::startsWith(AUHONO_SERVER_URL, "https://"), "AUHONO_SERVER_URL phải bắt đầu bằng https://");
+static_assert(AUHONO_SERVER_URL[cfg_detail::length(AUHONO_SERVER_URL) - 1] != '/', "AUHONO_SERVER_URL không được có dấu / ở cuối");
 
 // ── Chân GPIO (ESP32-C3 loại nhỏ; đổi bằng build flag nếu bo của bạn khác) ──
+// Chân strapping của ESP32-C3: GPIO2, GPIO8, GPIO9. Đọc README (mục "Đấu dây") trước khi đổi.
 #ifndef ONEWIRE_PIN
-#define ONEWIRE_PIN 4        // DATA của DS18B20 + điện trở kéo lên 4,7 kΩ về 3V3
+#define ONEWIRE_PIN 4        // DATA của DS18B20 + điện trở kéo lên 4,7 kΩ về 3V3. GPIO4 KHÔNG phải chân strapping.
 #endif
 #ifndef LED_PIN
-#define LED_PIN 8            // LED on-board (nhiều bo C3 SuperMini: GPIO8, sáng khi mức THẤP)
+#define LED_PIN 8            // LED on-board của C3 SuperMini (GPIO8, sáng khi mức THẤP). GPIO8 là chân strapping nhưng
+                             // LED nối 3V3 qua điện trở nên mức lúc reset vẫn = 1 (đúng yêu cầu), an toàn.
 #endif
 #ifndef LED_ACTIVE_LOW
 #define LED_ACTIVE_LOW 1
 #endif
 #ifndef BUTTON_PIN
-#define BUTTON_PIN 9         // nút BOOT on-board (mức thấp khi nhấn). Không nhấn giữ lúc cấp điện!
+#define BUTTON_PIN 9         // nút BOOT on-board (mức thấp khi nhấn). GPIO9 strapping: giữ THẤP lúc cấp điện/reset = vào chế độ nạp!
 #endif
 
 // ── Nhịp hoạt động (docs/PROTOCOL.md) ──────────────────────────────────────
@@ -41,20 +45,36 @@ constexpr uint32_t kSensorConversionMs = 800;               // DS18B20 12-bit c�
 constexpr uint32_t kUploadPeriodMs = 5UL * 60 * 1000;       // gửi gói định kỳ mỗi 5 phút
 constexpr uint32_t kImmediateMinIntervalMs = 60UL * 1000;   // gửi ngay (vượt ngưỡng): tối đa 1 lần/60 s
 constexpr size_t kBufferCapacity = 1440;                    // 24 giờ x 1 số đo/phút = 11,5 KB RAM
-constexpr uint32_t kOtaCheckIntervalMs = 6UL * 3600 * 1000; // hỏi OTA mỗi ~6 giờ
-constexpr uint32_t kOtaDownloadTimeoutMs = 10UL * 60 * 1000;
-constexpr uint32_t kOtaMinFreeHeap = 60UL * 1024;           // dưới mức này thì không tải (TLS cần ~40 KB)
+constexpr uint32_t kUploadStartJitterMaxMs = 20UL * 1000;   // trễ ngẫu nhiên (theo máy) trước lần gửi đầu sau khởi động
+constexpr uint32_t kUploadContinueMs = 2000;                // còn tồn sau một lần flush (giới hạn gói/thời gian): gửi tiếp sau 2 s
 
-// ── Độ bền ──────────────────────────────────────────────────────────────────
-constexpr uint32_t kWdtTimeoutS = 60;                       // task watchdog: reset nếu loop() đứng > 60 s
-constexpr uint32_t kHttpConnectTimeoutMs = 10000;
-constexpr uint32_t kHttpTimeoutMs = 15000;
+// ── OTA ─────────────────────────────────────────────────────────────────────
+constexpr uint32_t kOtaCheckIntervalMs = 6UL * 3600 * 1000; // hỏi OTA mỗi ~6 giờ
+constexpr uint32_t kOtaDeferredRetryMs = 5UL * 60 * 1000;   // có bản mới nhưng đang hoãn (còn số đo/vượt ngưỡng...): hỏi lại sau 5 phút
+constexpr uint32_t kOtaDownloadTimeoutMs = 4UL * 60 * 1000; // tải quá 4 phút là bỏ (đo/gửi bị tạm dừng trong lúc tải)
+constexpr uint32_t kOtaFirstBytesTimeoutMs = 10UL * 1000;   // chờ tiêu đề ảnh (36 byte đầu)
+
+// ── Độ bền: thời hạn của mọi thao tác chặn phải cộng lại < kWdtTimeoutS ─────
+// Một request HTTPS tệ nhất: DNS (lwIP tới ~15-30 s) + TCP connect + bắt tay TLS + chờ tiêu đề + đọc body.
+constexpr uint32_t kWdtTimeoutS = 120;                      // task watchdog: reset nếu loop() đứng > 120 s
+constexpr uint32_t kHttpConnectTimeoutMs = 8000;
+constexpr uint32_t kTlsHandshakeTimeoutS = 12;
+constexpr uint32_t kHttpTimeoutMs = 10000;                  // chờ tiêu đề phản hồi
+constexpr uint32_t kBodyReadTimeoutMs = 8000;               // đọc body
 constexpr size_t kMaxResponseBytes = 2048;
 constexpr uint32_t kNtpWaitMs = 20000;                      // NTP im lặng quá 20 s thì hỏi GET /v1/time
-constexpr uint32_t kTimeFallbackRetryMs = 60000;
-constexpr uint32_t kWifiFailToPortalMs = 20UL * 60 * 1000;  // mất Wi-Fi đã lưu > 20 phút => mở lại cổng cấu hình
-constexpr uint32_t kPortalTimeoutMs = 10UL * 60 * 1000;     // cổng cấu hình tự đóng sau 10 phút không ai lưu
-constexpr uint32_t kNoContactRestartMs = 12UL * 3600 * 1000;  // 12 giờ không liên lạc được server => khởi động lại
-constexpr uint32_t kRollbackWindowMs = 15UL * 60 * 1000;    // bản OTA mới phải liên lạc được server trong 15 phút
+
+// ── Cổng cấu hình Wi-Fi ─────────────────────────────────────────────────────
+constexpr uint32_t kPortalIdleTimeoutMs = 10UL * 60 * 1000; // đóng nếu 10 phút không có yêu cầu nào (đã có Wi-Fi lưu)
+constexpr uint32_t kPortalHardCapMs = 30UL * 60 * 1000;     // trần tuyệt đối 30 phút cho một lần mở (đã có Wi-Fi lưu)
+constexpr uint32_t kPortalAutoCloseGraceMs = 30UL * 1000;   // cổng tự mở: đóng khi Wi-Fi đã nối lại và không ai kết nối
+constexpr uint32_t kPortalRequestDeadlineMs = 6000;         // mỗi kết nối HTTP phải xong trong 6 s (chống slowloris)
+constexpr uint8_t kPortalMaxClients = 3;                    // số kết nối HTTP đồng thời
+constexpr uint32_t kSavedGraceMs = 2000;                    // chờ điện thoại nhận trang "Đã lưu" trước khi tắt AP
+
+// ── Sức khỏe ────────────────────────────────────────────────────────────────
+constexpr uint32_t kHeapCheckIntervalMs = 30UL * 1000;
+constexpr uint32_t kHeapLogIntervalMs = 30UL * 60 * 1000;
+constexpr uint8_t kLowHeapStrikesNotCritical = 20;          // 20 x 30 s = 10 phút heap không đủ mở TLS
 constexpr uint64_t kSeqStride = 64;                         // xem seq_counter.h (mòn flash)
 }  // namespace cfg

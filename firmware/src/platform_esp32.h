@@ -16,12 +16,14 @@ class MbedCrypto : public auhono::ICrypto {
   void hmacSha256(const uint8_t* key, size_t keyLen, const uint8_t* msg, size_t msgLen, uint8_t out[32]) override;
 };
 
+/// Nguồn ngẫu nhiên phần cứng (chỉ là ngẫu nhiên THẬT khi Wi-Fi/BT đang bật; bọc bằng auhono::MixedRandom để rải
+/// nhịp giữa các máy ngay từ lúc khởi động).
 class EspRandom : public auhono::IRandom {
  public:
-  uint32_t next() override;  // esp_random(): phần cứng, dùng RF khi Wi-Fi bật
+  uint32_t next() override;
 };
 
-/// millis, đồng hồ (NTP/server), watchdog.
+/// millis, giờ đơn điệu, đồng hồ (NTP/server), watchdog.
 class EspPlatform : public auhono::IPlatform {
  public:
   /// Đăng ký callback SNTP và cấu hình watchdog. Gọi một lần ở setup().
@@ -31,12 +33,13 @@ class EspPlatform : public auhono::IPlatform {
   bool ntpStarted() const { return ntpStarted_; }
 
   uint32_t millis() override { return ::millis(); }
+  uint32_t monoSeconds() override;
   uint32_t unixNow() override;
   bool clockTrusted() override { return trusted_; }
   void setUnix(uint32_t t) override;
   void feedWatchdog() override;
 
-  // Được gọi từ callback SNTP (task khác) nên là volatile.
+  // Được gọi từ callback SNTP (task khác) nên trạng thái là volatile.
   void onNtpSynced();
 
  private:
@@ -52,10 +55,20 @@ class NvsSeqStore : public auhono::ISeqStore {
 };
 
 /// HTTPS tới AUHONO_SERVER_URL: xác thực chứng chỉ máy chủ bằng bộ CA gốc nhúng sẵn (certs/roots.pem).
-/// Mỗi request một kết nối mới (5 phút/lần, không đáng giữ socket) và giới hạn kích thước phản hồi.
+/// Mỗi request một kết nối mới (5 phút/lần, không đáng giữ socket), giới hạn kích thước phản hồi, KHÔNG theo chuyển hướng
+/// (không bao giờ gửi chữ ký sang máy chủ khác), và từ chối mở TLS khi heap không đủ (auhono::tlsHeapOk).
 class HttpsTransport : public auhono::IHttp {
  public:
   auhono::HttpResponse perform(const auhono::HttpRequest& req) override;
+
+  /// Chế độ cứu hộ OTA: không xác thực chứng chỉ (xem tls_util.h). Chỉ bật quanh việc kiểm tra + tải OTA.
+  void setInsecureRescue(bool on) { insecureRescue_ = on; }
+  /// Lần perform gần nhất bị bỏ vì heap không đủ mở TLS? (đọc rồi xóa)
+  bool takeHeapLow() { const bool v = heapLow_; heapLow_ = false; return v; }
+
+ private:
+  bool insecureRescue_ = false;
+  bool heapLow_ = false;
 };
 
 /// Bộ CA gốc dạng PEM đã nhúng (kết thúc bằng '\0'); dùng chung cho API và tải OTA.

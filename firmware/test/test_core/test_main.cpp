@@ -13,6 +13,7 @@ void run_scenario_tests();
 void run_wifi_tests();
 void run_portal_http_tests();
 void run_ota_tests();
+void run_fuzz_tests();
 
 void setUp() {}
 void tearDown() {}
@@ -31,5 +32,6 @@ int main(int, char**) {
   run_wifi_tests();
   run_portal_http_tests();
   run_ota_tests();
+  run_fuzz_tests();
   return UNITY_END();
 }

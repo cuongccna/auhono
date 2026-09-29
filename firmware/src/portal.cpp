@@ -1,207 +1,318 @@
 #include "portal.h"
 
-#include <DNSServer.h>
-#include <WebServer.h>
+#include <Arduino.h>
 #include <WiFi.h>
+#include <WiFiClient.h>
+#include <WiFiServer.h>
+#include <WiFiUdp.h>
+#include <esp_random.h>
 
 #include <algorithm>
+#include <vector>
 
+#include "auhono/dns_reply.h"
+#include "auhono/hex.h"
+#include "auhono/http_request.h"
 #include "auhono/portal_form.h"
+#include "auhono/portal_page.h"
+#include "auhono/portal_routes.h"
+#include "auhono/url_form.h"
 #include "config.h"
 
 namespace {
-
-WebServer* g_server = nullptr;
-DNSServer* g_dns = nullptr;
-
 constexpr size_t kMaxNetworks = 20;
-constexpr uint32_t kSavedGraceMs = 2000;
-
-// Trang dùng CSS nội tuyến, không JavaScript. CSP bên dưới chặn mọi thứ ngoài ra.
-const char kHead[] =
-    "<!doctype html><html lang=\"vi\"><head><meta charset=\"utf-8\">"
-    "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-    "<title>Cài đặt Auhono</title><style>"
-    "body{font-family:system-ui,sans-serif;margin:0;background:#f4f6f8;color:#1c2833}"
-    "main{max-width:26rem;margin:0 auto;padding:1rem}"
-    "h1{font-size:1.3rem;margin:.5rem 0}"
-    "p,li{line-height:1.45}"
-    "label{display:block;margin:.9rem 0 .25rem;font-weight:600}"
-    "input,select,button{width:100%;box-sizing:border-box;font-size:1rem;padding:.7rem;border:1px solid #9aa5b1;border-radius:.5rem;background:#fff}"
-    "button{background:#0b6bcb;color:#fff;border:0;margin-top:1.2rem;font-weight:600}"
-    "a.btn{display:block;text-align:center;margin-top:.8rem;color:#0b6bcb}"
-    ".note{background:#fff8e1;border:1px solid #f0d78c;border-radius:.5rem;padding:.6rem .8rem;font-size:.92rem}"
-    ".err{background:#fdecea;border:1px solid #f5a9a3;border-radius:.5rem;padding:.6rem .8rem;color:#8a1c12}"
-    ".id{color:#5f6b7a;font-size:.9rem}"
-    "</style>";
-
-const char kFoot[] = "</main></body></html>";
-
+constexpr uint32_t kScanTimeoutMs = 15000;
 }  // namespace
 
-void Portal::start(const std::string& deviceId, uint32_t nowMs) {
-  if (active_) return;
-  deviceId_ = deviceId;
-  startedAt_ = nowMs;
-  saved_ = false;
-  networks_.clear();
+struct Portal::Impl {
+  struct Slot {
+    WiFiClient client;
+    auhono::HttpRequestParser parser;
+    uint32_t startMs = 0;
+    bool used = false;
+  };
 
-  // AP + STA: STA chỉ dùng để quét Wi-Fi xung quanh.
+  explicit Impl(const IPAddress& ip) : apIp(ip), server(ip, 80, 4) {}
+
+  IPAddress apIp;
+  std::string apIpStr;
+  WiFiServer server;   // chỉ lắng nghe trên IP của AP
+  WiFiUDP udp;         // DNS, cũng chỉ trên IP của AP
+  Slot slots[cfg::kPortalMaxClients];
+
+  std::string deviceId, fwVersion, csrf;
+  std::vector<auhono::PortalNetwork> networks;
+  bool scanning = false;
+  uint32_t scanStartedAt = 0;
+
+  bool saved = false;
+  uint32_t savedAt = 0;
+  auhono::WifiCreds pending;
+
+  bool byUser = false;
+  uint32_t startedAt = 0;
+  uint32_t lastActivity = 0;
+
+  std::string statusSsid;
+  bool statusConnected = false;
+  auhono::WifiFail statusFail = auhono::WifiFail::None;
+
+  // ── DNS ──
+  void serviceDns() {
+    const uint8_t ip4[4] = {apIp[0], apIp[1], apIp[2], apIp[3]};
+    for (int i = 0; i < 4; i++) {  // tối đa 4 gói mỗi vòng: không để một luồng gói làm nghẽn loop()
+      const int n = udp.parsePacket();
+      if (n <= 0) break;
+      uint8_t in[512];
+      if (n > static_cast<int>(sizeof in)) { udp.flush(); continue; }
+      const int r = udp.read(in, static_cast<size_t>(n));
+      udp.flush();
+      if (r <= 0) continue;
+      uint8_t out[512];
+      const size_t m = auhono::buildDnsReply(in, static_cast<size_t>(r), ip4, out, sizeof out);
+      if (m == 0) continue;
+      udp.beginPacket(udp.remoteIP(), udp.remotePort());
+      udp.write(out, m);
+      udp.endPacket();
+    }
+  }
+
+  // ── Quét Wi-Fi (không đồng bộ) ──
+  void startScan(uint32_t nowMs) {
+    if (scanning) return;
+    if (WiFi.status() != WL_CONNECTED) WiFi.disconnect(false);  // quét thất bại nếu STA đang dở dang kết nối
+    networks.clear();
+    const int16_t r = WiFi.scanNetworks(true);                  // không chặn
+    scanning = (r == WIFI_SCAN_RUNNING);
+    scanStartedAt = nowMs;
+  }
+
+  void pollScan(uint32_t nowMs) {
+    if (!scanning) return;
+    const int16_t n = WiFi.scanComplete();
+    if (n == WIFI_SCAN_RUNNING) {
+      if (static_cast<uint32_t>(nowMs - scanStartedAt) > kScanTimeoutMs) { WiFi.scanDelete(); scanning = false; }
+      return;
+    }
+    scanning = false;
+    networks.clear();
+    if (n > 0) {
+      std::vector<auhono::PortalNetwork> all;
+      for (int i = 0; i < n && all.size() < kMaxNetworks * 3; i++) {
+        std::string ssid = WiFi.SSID(static_cast<uint8_t>(i)).c_str();
+        if (auhono::validateSsid(ssid) != auhono::FormError::None) continue;  // bỏ tên rỗng (ẩn)/lạ
+        all.push_back({ssid, static_cast<int>(WiFi.RSSI(static_cast<uint8_t>(i)))});
+      }
+      // Mạnh nhất trước; bỏ trùng tên (nhiều băng/bộ phát cùng SSID).
+      std::sort(all.begin(), all.end(), [](const auhono::PortalNetwork& a, const auhono::PortalNetwork& b) { return a.rssi > b.rssi; });
+      for (const auto& net : all) {
+        const bool dup = std::any_of(networks.begin(), networks.end(), [&](const auhono::PortalNetwork& u) { return u.ssid == net.ssid; });
+        if (!dup && networks.size() < kMaxNetworks) networks.push_back(net);
+      }
+    }
+    WiFi.scanDelete();
+  }
+
+  // ── HTTP ──
+  auhono::PortalView view(const std::string& errorText = std::string(), const std::string& typedSsid = std::string()) const {
+    auhono::PortalView v;
+    v.deviceId = deviceId;
+    v.fwVersion = fwVersion;
+    v.scanning = scanning;
+    v.networks = networks;
+    v.errorText = errorText;
+    v.typedSsid = typedSsid;
+    v.csrfToken = csrf;
+    v.savedSsid = statusSsid;
+    v.wifiConnected = statusConnected;
+    v.wifiFail = statusFail;
+    return v;
+  }
+
+  static void respond(Slot& s, const std::string& data) {
+    const uint8_t* p = reinterpret_cast<const uint8_t*>(data.data());
+    size_t left = data.size();
+    const uint32_t deadline = millis() + 2000;
+    while (left > 0 && static_cast<int32_t>(millis() - deadline) < 0) {
+      const size_t w = s.client.write(p, left);
+      if (w == 0) { delay(5); continue; }
+      p += w;
+      left -= w;
+    }
+    s.client.stop();
+    s.used = false;
+  }
+
+  void handleSave(Slot& s, uint32_t nowMs) {
+    if (saved) { respond(s, auhono::buildPageResponse(200, auhono::renderSavedPage(pending.ssid))); return; }
+
+    std::vector<auhono::FormField> f;
+    if (!auhono::parseUrlEncoded(s.parser.body(), f)) {
+      respond(s, auhono::buildPageResponse(400, auhono::renderPortalPage(view("Dữ liệu gửi lên không hợp lệ."))));
+      return;
+    }
+    // Token phiên: chặn trang web khác (mở trên chính điện thoại này) tự gửi form vào 192.168.4.1.
+    const std::string tok = auhono::formValue(f, "t");
+    if (tok.size() != csrf.size() ||
+        !auhono::constTimeEqual(reinterpret_cast<const uint8_t*>(tok.data()), reinterpret_cast<const uint8_t*>(csrf.data()), csrf.size())) {
+      respond(s, auhono::buildPageResponse(400, auhono::renderPortalPage(view("Trang đã hết hạn, vui lòng thử lại."))));
+      return;
+    }
+    const std::string typed = auhono::formValue(f, "ssid");
+    const std::string password = auhono::formValue(f, "pass");
+    std::string ssid;
+    auhono::FormError err = auhono::FormError::None;
+    if (!auhono::resolveSsid(typed, auhono::formValue(f, "pick"), ssid)) err = auhono::FormError::SsidEmpty;
+    if (err == auhono::FormError::None) err = auhono::validateSsid(ssid);
+    if (err == auhono::FormError::None) err = auhono::validatePassword(password);
+    if (err != auhono::FormError::None) {
+      // Không phản hồi lại mật khẩu; chỉ giữ lại tên Wi-Fi đã gõ.
+      respond(s, auhono::buildPageResponse(400, auhono::renderPortalPage(view(auhono::formErrorText(err), typed))));
+      return;
+    }
+    pending.ssid = ssid;
+    pending.password = password;
+    saved = true;
+    savedAt = nowMs;
+    respond(s, auhono::buildPageResponse(200, auhono::renderSavedPage(ssid)));
+  }
+
+  void handleRequest(Slot& s, uint32_t nowMs) {
+    lastActivity = nowMs;
+    const auhono::HttpMethod m = s.parser.method();
+    switch (auhono::routeRequest(m, s.parser.path(), s.parser.host(), apIpStr)) {
+      case auhono::PortalRoute::Form:
+        respond(s, auhono::buildPageResponse(200, auhono::renderPortalPage(view()), m == auhono::HttpMethod::Head));
+        break;
+      case auhono::PortalRoute::Rescan:
+        startScan(nowMs);
+        respond(s, auhono::buildRedirectResponse("http://" + apIpStr + "/"));
+        break;
+      case auhono::PortalRoute::Save:
+        handleSave(s, nowMs);
+        break;
+      case auhono::PortalRoute::Redirect:
+      default:
+        // Mọi đường dẫn "thăm dò mạng" (Android/iOS/Windows...) và tên miền lạ: về trang cấu hình.
+        respond(s, auhono::buildRedirectResponse("http://" + apIpStr + "/"));
+        break;
+    }
+  }
+
+  void serviceClients(uint32_t nowMs) {
+    // Nhận kết nối mới (tối đa 4 mỗi vòng); hết chỗ thì từ chối ngay.
+    for (int i = 0; i < 4; i++) {
+      WiFiClient c = server.available();
+      if (!c) break;
+      Slot* spare = nullptr;
+      for (Slot& s : slots) if (!s.used) { spare = &s; break; }
+      if (!spare) { c.stop(); continue; }
+      c.setTimeout(2);  // giây: giới hạn ghi/đọc socket
+      spare->client = c;
+      spare->parser.reset();
+      spare->startMs = nowMs;
+      spare->used = true;
+    }
+    for (Slot& s : slots) {
+      if (!s.used) continue;
+      if (static_cast<uint32_t>(nowMs - s.startMs) > cfg::kPortalRequestDeadlineMs) {  // quá chậm/treo: slowloris
+        respond(s, auhono::buildErrorResponse(408));
+        continue;
+      }
+      const int avail = s.client.available();
+      if (avail > 0) {
+        uint8_t buf[256];
+        const int n = s.client.read(buf, static_cast<size_t>(avail < static_cast<int>(sizeof buf) ? avail : static_cast<int>(sizeof buf)));
+        if (n > 0) s.parser.feed(buf, static_cast<size_t>(n));
+      } else if (!s.client.connected()) {
+        s.client.stop();
+        s.used = false;
+        continue;
+      }
+      if (s.parser.state() == auhono::HttpRequestParser::State::Done) handleRequest(s, nowMs);
+      else if (s.parser.state() == auhono::HttpRequestParser::State::Error)
+        respond(s, auhono::buildErrorResponse(auhono::httpStatusFor(s.parser.error())));
+    }
+  }
+};
+
+bool Portal::start(const std::string& deviceId, const std::string& fwVersion, uint32_t nowMs, bool byUser) {
+  if (impl_) return true;
+
   WiFi.persistent(false);
-  WiFi.mode(WIFI_AP_STA);
-  WiFi.softAP(auhono::apSsid(deviceId_).c_str(), nullptr, 1, 0, 4);  // mở, kênh 1, tối đa 4 máy
-  delay(100);
+  WiFi.mode(WIFI_AP_STA);  // AP để cấu hình + STA để quét (và để tiếp tục thử nối Wi-Fi đã lưu nếu có)
+  const std::string ssid = auhono::apSsid(deviceId);
+  if (!WiFi.softAP(ssid.c_str(), nullptr, 1, 0, 4)) {  // Wi-Fi mở, kênh 1 (tự theo kênh STA khi đã nối), tối đa 4 điện thoại
+    Serial.println("[portal] khong mo duoc AP");
+    WiFi.softAPdisconnect(true);
+    return false;
+  }
+  delay(100);  // chờ AP có IP
 
-  g_dns = new DNSServer();
-  g_dns->start(53, "*", WiFi.softAPIP());  // mọi tên miền -> chính thiết bị (captive portal)
-
-  g_server = new WebServer(80);
-  g_server->on("/", HTTP_GET, [this]() { handleRoot(); });
-  g_server->on("/save", HTTP_POST, [this]() { handleSave(); });
-  g_server->on("/rescan", HTTP_GET, [this]() { handleRescan(); });
-  g_server->onNotFound([this]() { handleRedirect(); });  // /generate_204, /hotspot-detect.html, ...
-  g_server->begin();
-
-  WiFi.scanNetworks(true);  // quét không chặn; kết quả lấy ở pollScan()
-  scanning_ = true;
-  active_ = true;
+  IPAddress ip = WiFi.softAPIP();
+  if (ip == IPAddress(static_cast<uint32_t>(0))) ip = IPAddress(192, 168, 4, 1);
+  Impl* impl = new Impl(ip);
+  impl->apIpStr = ip.toString().c_str();
+  impl->deviceId = deviceId;
+  impl->fwVersion = fwVersion;
+  impl->byUser = byUser;
+  impl->startedAt = nowMs;
+  impl->lastActivity = nowMs;
+  uint8_t rnd[8];
+  for (uint8_t& b : rnd) b = static_cast<uint8_t>(esp_random());
+  impl->csrf = auhono::toHex(rnd, sizeof rnd);
+  impl->server.begin();
+  impl->udp.begin(ip, 53);
+  impl_ = impl;
+  impl_->startScan(nowMs);
+  return true;
 }
 
 void Portal::stop() {
-  if (!active_) return;
-  if (g_server) { g_server->stop(); delete g_server; g_server = nullptr; }
-  if (g_dns) { g_dns->stop(); delete g_dns; g_dns = nullptr; }
+  if (!impl_) return;
+  impl_->server.stop();
+  impl_->udp.stop();
+  for (Impl::Slot& s : impl_->slots) if (s.used) s.client.stop();
   WiFi.scanDelete();
   WiFi.softAPdisconnect(true);
-  scanning_ = false;
-  active_ = false;
+  delete impl_;
+  impl_ = nullptr;
 }
 
-void Portal::loop(uint32_t) {
-  if (!active_) return;
-  g_dns->processNextRequest();
-  g_server->handleClient();
-  pollScan();
+void Portal::loop(uint32_t nowMs) {
+  if (!impl_) return;
+  impl_->serviceDns();
+  impl_->serviceClients(nowMs);
+  impl_->pollScan(nowMs);
 }
 
-void Portal::pollScan() {
-  if (!scanning_) return;
-  const int n = WiFi.scanComplete();
-  if (n == WIFI_SCAN_RUNNING) return;
-  scanning_ = false;
-  networks_.clear();
-  if (n > 0) {
-    for (int i = 0; i < n && networks_.size() < kMaxNetworks * 2; i++) {
-      std::string ssid = WiFi.SSID(i).c_str();
-      if (auhono::validateSsid(ssid) != auhono::FormError::None) continue;  // bỏ tên rỗng/ẩn/lạ
-      networks_.push_back({ssid, WiFi.RSSI(i)});
-    }
-    // Mạnh nhất trước; bỏ trùng tên (nhiều băng/bộ phát cùng SSID).
-    std::sort(networks_.begin(), networks_.end(), [](const Network& a, const Network& b) { return a.rssi > b.rssi; });
-    std::vector<Network> unique;
-    for (const Network& net : networks_) {
-      const bool dup = std::any_of(unique.begin(), unique.end(), [&](const Network& u) { return u.ssid == net.ssid; });
-      if (!dup && unique.size() < kMaxNetworks) unique.push_back(net);
-    }
-    networks_.swap(unique);
-  }
-  WiFi.scanDelete();
-}
-
-std::string Portal::renderForm(const std::string& errorText, const std::string& typedSsid) const {
-  using auhono::htmlEscape;
-  std::string h = kHead;
-  if (scanning_) h += "<meta http-equiv=\"refresh\" content=\"4\">";  // tự tải lại trong lúc quét
-  h += "</head><body><main><h1>Cài đặt Wi-Fi cho Auhono</h1>";
-  h += "<p class=\"id\">Mã thiết bị: <b>" + htmlEscape(deviceId_.empty() ? "chưa nạp" : deviceId_) + "</b> &middot; phiên bản " +
-       htmlEscape(AUHONO_FW_VERSION) + "</p>";
-  h += "<p class=\"note\">Thiết bị chỉ dùng Wi-Fi <b>2.4 GHz</b>. Nếu không thấy Wi-Fi của quán trong danh sách, "
-       "hãy bật băng tần 2.4 GHz trên modem (không dùng tên mạng chỉ có 5 GHz).</p>";
-  if (!errorText.empty()) h += "<p class=\"err\">" + htmlEscape(errorText) + "</p>";
-
-  h += "<form method=\"post\" action=\"/save\" autocomplete=\"off\">";
-  h += "<label for=\"pick\">Chọn Wi-Fi của quán</label><select id=\"pick\" name=\"pick\">";
-  if (scanning_) {
-    h += "<option value=\"\">Đang quét...</option>";
-  } else {
-    h += "<option value=\"\">-- chọn Wi-Fi --</option>";
-    for (const Network& n : networks_) {
-      h += "<option value=\"" + htmlEscape(n.ssid) + "\">" + htmlEscape(n.ssid) + " (" + std::to_string(n.rssi) + " dBm)</option>";
-    }
-  }
-  h += "</select><a class=\"btn\" href=\"/rescan\">Quét lại</a>";
-  h += "<label for=\"ssid\">Hoặc nhập tên Wi-Fi (mạng ẩn)</label>"
-       "<input id=\"ssid\" name=\"ssid\" maxlength=\"32\" value=\"" + htmlEscape(typedSsid) + "\" autocapitalize=\"off\">";
-  h += "<label for=\"pass\">Mật khẩu Wi-Fi</label>"
-       "<input id=\"pass\" name=\"pass\" type=\"password\" maxlength=\"63\" autocapitalize=\"off\">";
-  h += "<button type=\"submit\">Lưu và kết nối</button></form>";
-  h += kFoot;
-  return h;
-}
-
-void Portal::sendPage(int code, const std::string& html) {
-  // Tiêu đề bảo mật: không JS, không tài nguyên ngoài, không lưu cache, không lộ referrer.
-  g_server->sendHeader("Content-Security-Policy",
-                       "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'");
-  g_server->sendHeader("X-Content-Type-Options", "nosniff");
-  g_server->sendHeader("Referrer-Policy", "no-referrer");
-  g_server->sendHeader("Cache-Control", "no-store");
-  g_server->send(code, "text/html; charset=utf-8", html.c_str());
-}
-
-void Portal::handleRoot() { sendPage(200, renderForm("", "")); }
-
-void Portal::handleRescan() {
-  if (!scanning_) {
-    WiFi.scanNetworks(true);
-    scanning_ = true;
-  }
-  g_server->sendHeader("Location", "/");
-  g_server->send(303, "text/plain", "");
-}
-
-void Portal::handleSave() {
-  if (saved_) {  // đã lưu rồi, đang chờ chuyển mạng
-    sendPage(200, "Đã lưu.");
-    return;
-  }
-  // Đầu vào đã được thư viện WebServer giải mã URL; kiểm tra độ dài/ký tự ở đây.
-  const std::string typed = g_server->arg("ssid").c_str();
-  const std::string picked = g_server->arg("pick").c_str();
-  const std::string password = g_server->arg("pass").c_str();
-  const std::string ssid = auhono::pickSsid(typed, picked);
-
-  auhono::FormError err = auhono::validateSsid(ssid);
-  if (err == auhono::FormError::None) err = auhono::validatePassword(password);
-  if (err != auhono::FormError::None) {
-    sendPage(400, renderForm(auhono::formErrorText(err), typed));  // không phản hồi lại mật khẩu
-    return;
-  }
-
-  pending_.ssid = ssid;
-  pending_.password = password;
-  saved_ = true;
-  savedAt_ = millis();
-
-  std::string h = kHead;
-  h += "</head><body><main><h1>Đã lưu</h1><p>Thiết bị đang kết nối tới Wi-Fi <b>" + auhono::htmlEscape(ssid) +
-       "</b>. Wi-Fi \"Auhono\" sẽ tắt trong giây lát.</p>"
-       "<p>Đèn sáng liên tục nghĩa là đã kết nối thành công. Nếu đèn nháy chậm quá 2 phút, "
-       "hãy kiểm tra lại mật khẩu: giữ nút trên thiết bị 5 giây để mở lại trang này.</p>";
-  h += kFoot;
-  sendPage(200, h);
-}
-
-void Portal::handleRedirect() {
-  // Trình duyệt kiểm tra kết nối (Android/iOS/Windows) hỏi các đường dẫn lạ: đưa về trang cấu hình.
-  g_server->sendHeader("Location", "http://192.168.4.1/");
-  g_server->send(302, "text/plain", "");
-}
-
-bool Portal::takeSaved(WifiCreds& out, uint32_t nowMs) {
-  if (!saved_ || static_cast<uint32_t>(nowMs - savedAt_) < kSavedGraceMs) return false;
-  out = pending_;
-  pending_ = WifiCreds();
-  saved_ = false;
+bool Portal::takeSaved(auhono::WifiCreds& out, uint32_t nowMs) {
+  if (!impl_ || !impl_->saved || static_cast<uint32_t>(nowMs - impl_->savedAt) < cfg::kSavedGraceMs) return false;
+  out = impl_->pending;
+  impl_->pending = auhono::WifiCreds();
+  impl_->saved = false;
   return true;
+}
+
+void Portal::setStatus(const std::string& savedSsid, bool connected, auhono::WifiFail fail) {
+  if (!impl_) return;
+  impl_->statusSsid = savedSsid;
+  impl_->statusConnected = connected;
+  impl_->statusFail = fail;
+}
+
+bool Portal::byUser() const { return impl_ && impl_->byUser; }
+uint8_t Portal::stationCount() const { return impl_ ? WiFi.softAPgetStationNum() : 0; }
+bool Portal::scanning() const { return impl_ && impl_->scanning; }
+
+bool Portal::idleTimedOut(uint32_t nowMs) const {
+  if (!impl_) return false;
+  return static_cast<uint32_t>(nowMs - impl_->lastActivity) >= cfg::kPortalIdleTimeoutMs ||
+         static_cast<uint32_t>(nowMs - impl_->startedAt) >= cfg::kPortalHardCapMs;
+}
+
+void Portal::touch(uint32_t nowMs) {
+  if (!impl_) return;
+  impl_->lastActivity = nowMs;
+  impl_->startedAt = nowMs;
 }

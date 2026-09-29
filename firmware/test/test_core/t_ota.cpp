@@ -178,14 +178,12 @@ static void test_ota_loop_protection_stops_after_three_installs() {
     OtaLedger oldFw(st);
     oldFw.load();
     TEST_ASSERT_TRUE(oldFw.onBoot("1.0.0") == OtaLedger::BootVerdict::Normal);
-    l = OtaLedger(st);
     l.load();
     TEST_ASSERT_FALSE(l.record().pending);
   }
   TEST_ASSERT_FALSE(l.mayInstall("1.0.1"));   // đủ 3 lần: ngừng, không cài lại mỗi lần khởi động (mòn flash!)
   TEST_ASSERT_TRUE(l.mayInstall("1.0.2"));    // bản KHÁC thì thử được
   TEST_ASSERT_TRUE(l.beforeInstall("1.0.2"));
-  TEST_ASSERT_TRUE(l.mayInstall("1.0.1") || !l.mayInstall("1.0.1"));
 }
 
 static void test_ota_confirmation_resets_and_new_fw_boots_counted() {
@@ -197,11 +195,11 @@ static void test_ota_confirmation_resets_and_new_fw_boots_counted() {
   OtaLedger fw(st);
   fw.load();
   TEST_ASSERT_TRUE(fw.onBoot("1.0.1") == OtaLedger::BootVerdict::Normal);
-  fw = OtaLedger(st); fw.load();
+  fw.load();
   TEST_ASSERT_TRUE(fw.onBoot("1.0.1") == OtaLedger::BootVerdict::Normal);
-  fw = OtaLedger(st); fw.load();
+  fw.load();
   TEST_ASSERT_TRUE(fw.onBoot("1.0.1") == OtaLedger::BootVerdict::Normal);
-  fw = OtaLedger(st); fw.load();
+  fw.load();
   TEST_ASSERT_TRUE(fw.onBoot("1.0.1") == OtaLedger::BootVerdict::Rollback);
   // Ngược lại: nếu xác nhận được thì mọi thứ về sạch
   MemOtaStore st2;

@@ -1,22 +1,36 @@
 // Auhono: cảm biến nhiệt độ tủ đông (ESP32-C3 + DS18B20).
 //
-// Toàn bộ logic không phụ thuộc phần cứng nằm trong lib/auhono_core (có test chạy trên máy).
-// File này chỉ "dán" các phần với phần cứng: Wi-Fi, HTTPS, NVS, DS18B20, OTA, cổng cấu hình, LED.
+// Toàn bộ logic không phụ thuộc phần cứng nằm trong lib/auhono_core (có test chạy trên máy). File này chỉ "dán" các phần
+// với phần cứng: Wi-Fi, HTTPS, NVS, DS18B20, OTA, cổng cấu hình, LED, và điều phối theo chính sách của lõi.
 //
 // Vòng lặp chính (không chặn lâu, luôn nuôi watchdog):
-//   nút bấm -> Wi-Fi -> cổng cấu hình -> đồng hồ -> đo -> gửi -> OTA -> đèn LED
+//   nút bấm -> Wi-Fi -> cổng cấu hình -> đồng hồ -> đo -> gửi -> OTA -> bảo trì -> đèn LED
+//
+// Nguyên tắc thiết kế (xem README, bảng "Tình huống thực tế"):
+//   - số đo đóng dấu bằng GIỜ ĐƠN ĐIỆU (giây từ lúc khởi động), đổi sang giờ unix lúc gửi => số đo sau mất điện, trước khi có NTP,
+//     vẫn được gửi với giờ đúng, và NTP/clock_skew chỉnh giờ giữa chừng không làm sai dữ liệu;
+//   - mọi so sánh thời gian dùng phép trừ uint32 (an toàn khi millis() tràn 49,7 ngày);
+//   - không thao tác nào chặn quá vài chục giây (mọi thời hạn cộng lại < watchdog 120 s).
 #include <Arduino.h>
 #include <esp_ota_ops.h>
+#include <esp_partition.h>
+#include <esp_system.h>
 #include <sdkconfig.h>
 
 #include <memory>
 
 #include "auhono/button.h"
+#include "auhono/jitter_random.h"
 #include "auhono/led.h"
+#include "auhono/maintenance.h"
+#include "auhono/ota_policy.h"
+#include "auhono/plausibility.h"
 #include "auhono/portal_form.h"
 #include "auhono/readings.h"
+#include "auhono/retry_policy.h"
 #include "auhono/time_policy.h"
 #include "auhono/uploader.h"
+#include "auhono/wifi_policy.h"
 #include "config.h"
 #include "ota.h"
 #include "platform_esp32.h"
@@ -27,18 +41,21 @@
 #include "wifi_manager.h"
 
 #ifdef SET_LOOP_TASK_STACK_SIZE
-SET_LOOP_TASK_STACK_SIZE(12 * 1024);  // TLS + kiểm chữ ký cần nhiều stack hơn mặc định 8 KB
+SET_LOOP_TASK_STACK_SIZE(16 * 1024);  // TLS + kiểm chữ ký + OTA cần nhiều stack hơn mặc định 8 KB
 #endif
 
-// Rollback OTA: mặc định core Arduino tự "xác nhận" bản mới ngay lúc khởi động (như vậy rollback vô
-// nghĩa). Trả true để DỜI việc xác nhận tới khi bản mới liên lạc được với server (xem markAppValid()).
+// Rollback OTA: mặc định core Arduino tự "xác nhận" bản mới ngay lúc khởi động (như vậy rollback vô nghĩa). Trả true để DỜI
+// việc xác nhận tới khi bản mới liên lạc được với server (xem markAppValid()). Core 2.0.17 dịch với CONFIG_APP_ROLLBACK_ENABLE=y
+// và bootloader dựng sẵn của nó có mã rollback (CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y); nếu vì lý do nào đó không, lớp
+// rollback MỀM bằng sổ cài (OtaLedger) vẫn hoạt động.
 #ifdef CONFIG_APP_ROLLBACK_ENABLE
 extern "C" bool verifyRollbackLater() { return true; }
 #endif
 
 // ── Đối tượng toàn cục ─────────────────────────────────────────────────────
 static MbedCrypto g_crypto;
-static EspRandom g_rng;
+static EspRandom g_hwRng;
+static auhono::MixedRandom g_rng(g_hwRng, 0x9E3779B9u);  // hạt giống riêng từng máy được trộn thêm sau khi có mã thiết bị
 static EspPlatform g_platform;
 static NvsSeqStore g_seqStore;
 static auhono::SeqCounter g_seq(g_seqStore, cfg::kSeqStride);
@@ -47,9 +64,15 @@ static HttpsTransport g_http;
 static auhono::ReadingBuffer g_buffer(cfg::kBufferCapacity);  // 1440 x 8 B = 11,5 KB (RAM; mất khi mất điện)
 static auhono::Thresholds g_thresholds;
 static auhono::UploadPolicy g_policy(cfg::kUploadPeriodMs, cfg::kImmediateMinIntervalMs);
-static auhono::Backoff g_uploadBackoff(g_rng);
+static auhono::RetryScheduler g_retry(g_rng);
+static auhono::Backoff g_timeBackoff(g_rng);
 static auhono::SensorHealth g_health;
+static auhono::ReadingFilter g_filter;
 static auhono::ButtonGesture g_button;
+static auhono::TlsRescue g_rescue;
+
+static NvsOtaStore g_otaStore;
+static auhono::OtaLedger g_ota(g_otaStore);
 
 static WifiManager g_wifi(g_rng);
 static Portal g_portal;
@@ -64,39 +87,74 @@ static std::unique_ptr<auhono::ReadingsUploader> g_uploader;
 // ── Trạng thái vận hành ────────────────────────────────────────────────────
 static bool g_hasWifiCreds = false;
 static auhono::UploadStatus g_uploadStatus = auhono::UploadStatus::Unknown;
-static bool g_serverContact = false;      // đã có ít nhất một phản hồi 200 từ lúc khởi động
-static uint32_t g_lastContactMs = 0;
+static bool g_lastUploadOk = false;
+static bool g_serverContact = false;      // đã có ít nhất một phản hồi hợp lệ từ server kể từ lúc khởi động
+static uint32_t g_contactRefMs = 0;       // lần liên lạc thành công gần nhất, hoặc lúc Wi-Fi nối lại (cái nào muộn hơn)
+static bool g_prevWifiUp = false;
 static bool g_appPendingVerify = false;   // bản OTA mới chưa được xác nhận
 static bool g_appMarkedValid = false;
+static uint8_t g_recoveryStage = 0;
 
 static uint32_t g_nextSampleAt = 0;
 static uint32_t g_conversionReadyAt = 0;
 static bool g_conversionPending = false;
+static uint32_t g_confirmAt = 0;
+static bool g_confirmPending = false;
+static bool g_haveLast = false;
+static int16_t g_lastCenti = 0;
+static uint32_t g_lastReadingMono = 0;
+static uint32_t g_lastSensorLogMs = 0;
 
 static uint32_t g_wifiUpAt = 0;
 static uint32_t g_nextTimeFallbackAt = 0;
 static uint32_t g_nextOtaAt = 0;
+static bool g_uploadGateArmed = false;
+
+static uint32_t g_nextHeapCheckAt = 0;
+static uint32_t g_nextHeapLogAt = 0;
+static uint8_t g_critStrikes = 0;
+static uint8_t g_lowStrikes = 0;
+static uint32_t g_nextPortalStatusAt = 0;
+static uint32_t g_nextHoldOffCheckAt = 0;
+static uint32_t g_portalAutoCloseAt = 0;
 
 // ── Tiện ích ───────────────────────────────────────────────────────────────
 
 static bool reached(uint32_t now, uint32_t deadline) { return static_cast<int32_t>(now - deadline) >= 0; }
 
-static void startPortal(uint32_t now) {
-  if (g_portal.active()) return;
-  Serial.println("[portal] mo Wi-Fi cau hinh");
-  g_wifi.stop();
-  g_portal.start(g_identity.deviceId, now);
+static const char* resetReasonText(esp_reset_reason_t r) {
+  switch (r) {
+    case ESP_RST_POWERON:   return "cap dien";
+    case ESP_RST_EXT:       return "chan RESET ngoai";
+    case ESP_RST_SW:        return "phan mem (esp_restart)";
+    case ESP_RST_PANIC:     return "PANIC/exception";
+    case ESP_RST_INT_WDT:   return "watchdog ngat";
+    case ESP_RST_TASK_WDT:  return "watchdog tac vu (loop dung)";
+    case ESP_RST_WDT:       return "watchdog khac";
+    case ESP_RST_DEEPSLEEP: return "deep sleep";
+    case ESP_RST_BROWNOUT:  return "BROWNOUT (nguon sut ap)";
+    default:                return "khong ro";
+  }
 }
 
-static void stopPortalAndResume(uint32_t now) {
-  g_portal.stop();
-  const WifiCreds creds = loadWifiCreds();
-  g_hasWifiCreds = creds.present();
-  if (g_hasWifiCreds) g_wifi.begin(creds, now);
+static bool breachActive() {
+  // Số đo gần nhất còn "tươi" (10 phút) và vượt ngưỡng: đang có báo động, ưu tiên gửi/cảnh báo hơn OTA/khởi động lại.
+  if (!g_haveLast) return false;
+  if (static_cast<uint32_t>(g_platform.monoSeconds() - g_lastReadingMono) > 600) return false;
+  return g_thresholds.outOfRange(g_lastCenti);
+}
+
+/// Khởi động lại có LÝ DO: ghi NVS trước khi restart để log lần sau còn biết vì sao.
+static void rebootWithReason(auhono::RebootReason why) {
+  Serial.printf("[reboot] %s\n", auhono::rebootReasonText(why));
+  saveRebootReason(why);
+  delay(300);
+  ESP.restart();
 }
 
 /// Xác nhận bản firmware hiện tại là tốt (hủy rollback) sau lần liên lạc thành công đầu tiên.
 static void markAppValid() {
+  g_ota.onConfirmed();
   if (g_appMarkedValid || !g_appPendingVerify) return;
   if (esp_ota_mark_app_valid_cancel_rollback() == ESP_OK) {
     g_appMarkedValid = true;
@@ -104,18 +162,49 @@ static void markAppValid() {
   }
 }
 
+static void noteContact(uint32_t now) {
+  g_serverContact = true;
+  g_contactRefMs = now;
+  g_recoveryStage = 0;
+  markAppValid();
+}
+
+/// Rollback mềm: đặt lại khe khởi động về ảnh cũ (esp_ota_set_boot_partition tự xác thực ảnh) rồi khởi động lại.
+static bool softRollback() {
+  const esp_partition_t* other = esp_ota_get_next_update_partition(nullptr);
+  if (!other || esp_ota_set_boot_partition(other) != ESP_OK) return false;
+  rebootWithReason(auhono::RebootReason::Rollback);
+  return true;
+}
+
+static void startPortal(uint32_t now, bool byUser) {
+  if (g_portal.active()) return;
+  Serial.println("[portal] mo Wi-Fi cau hinh");
+  if (!g_portal.start(g_identity.valid ? g_identity.deviceId : std::string(), AUHONO_FW_VERSION, now, byUser)) return;
+  g_portalAutoCloseAt = 0;
+  g_nextPortalStatusAt = 0;
+}
+
+static void stopPortal(uint32_t now) {
+  g_portal.stop();
+  g_wifi.setHoldOff(false);
+  g_wifi.resetDisconnectTimer(now);  // đếm lại từ đầu trước khi tự mở lại
+  if (g_hasWifiCreds && !g_wifi.active()) g_wifi.begin(loadWifiCreds(), now);  // vd. sau khi xóa Wi-Fi rồi cấu hình lại
+}
+
 // ── Xử lý các phần ─────────────────────────────────────────────────────────
 
 static void handleButton(uint32_t now) {
   switch (g_button.update(digitalRead(BUTTON_PIN) == LOW, now)) {
-    case auhono::ButtonEvent::LongPress:      // giữ 5 s: mở cổng cấu hình
-      startPortal(now);
+    case auhono::ButtonEvent::LongPress:      // giữ 5 s: mở cổng cấu hình (STA vẫn tiếp tục thử nối Wi-Fi đã lưu)
+      startPortal(now, true);
       break;
-    case auhono::ButtonEvent::VeryLongPress:  // giữ 15 s: xóa Wi-Fi đã lưu (giữ danh tính)
+    case auhono::ButtonEvent::VeryLongPress:  // giữ >= 15 s rồi NHẢ: xóa Wi-Fi đã lưu (giữ danh tính)
       Serial.println("[reset] xoa Wi-Fi da luu");
       clearWifiCreds();
       g_hasWifiCreds = false;
-      startPortal(now);
+      g_wifi.stop();
+      startPortal(now, true);
       break;
     default:
       break;
@@ -123,135 +212,311 @@ static void handleButton(uint32_t now) {
 }
 
 static void handlePortal(uint32_t now) {
-  if (!g_portal.active()) return;
-  g_portal.loop(now);
+  if (g_portal.active()) {
+    g_portal.loop(now);
 
-  WifiCreds saved;
-  if (g_portal.takeSaved(saved, now)) {
-    if (saveWifiCreds(saved)) Serial.println("[portal] da luu Wi-Fi moi");
-    g_portal.stop();
-    g_hasWifiCreds = true;
-    g_wifi.begin(saved, now);
-    g_uploadStatus = auhono::UploadStatus::Unknown;
+    if (reached(now, g_nextPortalStatusAt)) {  // trạng thái Wi-Fi hiện lên trang (1 s một lần)
+      g_nextPortalStatusAt = now + 1000;
+      g_portal.setStatus(g_wifi.creds().ssid, g_wifi.connected(), g_wifi.lastFail());
+    }
+    if (reached(now, g_nextHoldOffCheckAt)) {  // có điện thoại đang dùng AP hoặc đang quét: tạm dừng thử nối để không nhảy kênh
+      g_nextHoldOffCheckAt = now + 500;
+      g_wifi.setHoldOff(g_portal.stationCount() > 0 || g_portal.scanning());
+    }
+
+    auhono::WifiCreds saved;
+    if (g_portal.takeSaved(saved, now)) {
+      if (saveWifiCreds(saved)) Serial.println("[portal] da luu Wi-Fi moi");
+      else Serial.println("[portal] CANH BAO: khong ghi duoc Wi-Fi vao flash, dung tam trong RAM");
+      g_portal.stop();
+      g_wifi.setHoldOff(false);
+      g_hasWifiCreds = true;
+      g_wifi.begin(saved, now);
+      g_uploadStatus = auhono::UploadStatus::Unknown;
+      return;
+    }
+
+    if (!g_hasWifiCreds) {
+      g_portal.touch(now);  // chưa có Wi-Fi nào: thiết bị chưa làm gì khác được, cổng mở cho tới khi được cấu hình
+    } else if (g_portal.idleTimedOut(now)) {
+      Serial.println("[portal] het gio, tiep tuc thu Wi-Fi da luu");
+      stopPortal(now);  // KHÔNG khởi động lại: giữ số đo trong RAM
+    } else if (!g_portal.byUser() && g_wifi.connected() && g_portal.stationCount() == 0) {
+      // Cổng tự mở vì mất Wi-Fi, nay Wi-Fi đã về và không ai đang cấu hình: đóng sau một lúc.
+      if (g_portalAutoCloseAt == 0) g_portalAutoCloseAt = now ? now : 1;
+      if (static_cast<uint32_t>(now - g_portalAutoCloseAt) >= cfg::kPortalAutoCloseGraceMs) {
+        Serial.println("[portal] Wi-Fi da ve, dong cong");
+        stopPortal(now);
+      }
+    } else {
+      g_portalAutoCloseAt = 0;
+    }
     return;
   }
-  if (g_portal.timedOut(now, cfg::kPortalTimeoutMs)) {
-    Serial.println("[portal] het gio");
-    if (g_hasWifiCreds) {
-      stopPortalAndResume(now);  // quay lại thử Wi-Fi đã lưu, KHÔNG khởi động lại (giữ số đo trong RAM)
-    } else {
-      ESP.restart();             // chưa có Wi-Fi nào: khởi động lại cho sạch rồi mở lại cổng
-    }
+
+  // Cổng đóng: mất Wi-Fi đã lưu đủ lâu (mặc định 20 phút; sớm hơn — 5 phút — nếu router THẤY nhưng từ chối, tức đổi mật khẩu)
+  // thì mở lại để chủ quán tự sửa mà không cần cáp/nút.
+  if (g_hasWifiCreds && auhono::shouldOpenPortal(g_wifi.disconnectedForMs(now), g_wifi.lastFail(), g_wifi.failStableMs(now))) {
+    g_wifi.resetDisconnectTimer(now);
+    startPortal(now, false);
   }
 }
 
 static void handleClock(uint32_t now) {
   static bool prevTrusted = false;
 
-  if (!g_wifi.connected()) { g_wifiUpAt = 0; return; }
-  if (g_wifiUpAt == 0) {
-    g_wifiUpAt = now ? now : 1;
-    g_lastContactMs = now;  // "12 giờ không liên lạc" chỉ tính khi Wi-Fi đang nối (mất Wi-Fi lâu không gây khởi động lại)
-  }
+  const bool up = g_wifi.connected();
+  if (up && !g_prevWifiUp) g_contactRefMs = now;  // "không liên lạc được" chỉ tính từ lúc Wi-Fi nối
+  g_prevWifiUp = up;
+  if (!up) { g_wifiUpAt = 0; return; }
+  if (g_wifiUpAt == 0) g_wifiUpAt = now ? now : 1;
   g_platform.startNtp();
 
-  // NTP không trả lời sau kNtpWaitMs: hỏi giờ từ server (GET /v1/time, không cần ký).
-  if (!g_platform.clockTrusted() && g_client && reached(now, g_wifiUpAt + cfg::kNtpWaitMs) &&
-      reached(now, g_nextTimeFallbackAt)) {
-    g_nextTimeFallbackAt = now + cfg::kTimeFallbackRetryMs;
-    Serial.println(g_client->syncTimeFromServer() ? "[time] lay gio tu server" : "[time] chua co gio");
+  // NTP không trả lời sau kNtpWaitMs (UDP/123 bị router chặn...): hỏi giờ từ server qua HTTPS (GET /v1/time, không cần ký;
+  // TLS đã xác thực server nên tin được). Thử lại với backoff, không dồn dập.
+  if (!g_platform.clockTrusted() && g_client && reached(now, g_wifiUpAt + cfg::kNtpWaitMs) && reached(now, g_nextTimeFallbackAt)) {
+    if (g_client->syncTimeFromServer()) {
+      Serial.println("[time] lay gio tu server");
+      g_timeBackoff.reset();
+      g_nextTimeFallbackAt = now + 60000;
+    } else {
+      g_nextTimeFallbackAt = now + g_timeBackoff.nextDelayMs();
+      Serial.println("[time] chua co gio");
+    }
   }
 
-  // Vừa có giờ đáng tin: đo ngay (các số đo trước đó đã bị bỏ vì chưa biết giờ).
   const bool trusted = g_platform.clockTrusted();
-  if (trusted && !prevTrusted) g_nextSampleAt = now;
+  if (trusted && !prevTrusted) Serial.printf("[time] da co gio, con %u so do dang cho gui\n", static_cast<unsigned>(g_buffer.size()));
   prevTrusted = trusted;
+}
+
+static void logSensorProblem(const SensorSample& s, uint32_t now) {
+  if (static_cast<uint32_t>(now - g_lastSensorLogMs) < 60000 && g_lastSensorLogMs != 0) return;  // không xả log
+  g_lastSensorLogMs = now ? now : 1;
+  const char* why = !s.busPresent ? "khong thay cam bien (dut day/rut dau do/thieu tro keo 4,7k)"
+                    : s.status == auhono::Ds18Status::BadCrc ? "CRC sai (nhieu/cap dai)"
+                    : s.status == auhono::Ds18Status::BadLayout ? "du lieu rac"
+                    : s.status == auhono::Ds18Status::PowerOnValue ? "gia tri 85 do luc cap dien"
+                    : "ngoai dai do";
+  Serial.printf("[sensor] LOI: %s (%u lan lien tiep)\n", why, static_cast<unsigned>(g_health.consecutiveBad()));
+}
+
+static void onSensorResult(const SensorSample& s, uint32_t now) {
+  const uint32_t mono = g_platform.monoSeconds();
+  if (s.status != auhono::Ds18Status::Ok) {  // không ghi, không gửi: thiết bị im lặng -> server báo "mất kết nối"; đèn báo lỗi đầu dò
+    g_filter.onSensorError();
+    g_confirmPending = false;
+    g_health.onBad();
+    logSensorProblem(s, now);
+    return;
+  }
+  switch (g_filter.onSample(s.centi, mono)) {
+    case auhono::Verdict::Accept: {
+      g_health.onGood();
+      g_buffer.push(auhono::Reading{mono, s.centi});
+      g_haveLast = true;
+      g_lastCenti = s.centi;
+      g_lastReadingMono = mono;
+      g_policy.noteReading(g_thresholds.outOfRange(s.centi));
+      char num[12];
+      auhono::formatCenti(s.centi, num, sizeof num);
+      Serial.printf("[sensor] %s C (con %u so do)\n", num, static_cast<unsigned>(g_buffer.size()));
+      break;
+    }
+    case auhono::Verdict::Confirm:  // nghi ngờ (nhảy lớn/số đo đầu tiên): đo lại sau vài giây thay vì chờ 1 phút
+      g_confirmPending = true;
+      g_confirmAt = now + auhono::ReadingFilter::kConfirmDelayMs;
+      break;
+    case auhono::Verdict::Reject:
+      g_health.onBad();
+      Serial.println("[sensor] bo so do nhieu (khong on dinh)");
+      break;
+  }
+}
+
+static void startConversion(uint32_t now) {
+  g_sensor.startConversion();
+  g_conversionPending = true;
+  g_conversionReadyAt = now + cfg::kSensorConversionMs;
 }
 
 static void handleSampling(uint32_t now) {
   if (g_conversionPending && reached(now, g_conversionReadyAt)) {
     g_conversionPending = false;
-    const float c = g_sensor.readCelsius();
-    const auhono::ReadStatus st = auhono::classifyCelsius(c);
-    g_health.onRead(st);
-    if (st != auhono::ReadStatus::Ok) {
-      Serial.printf("[sensor] bo so do loi (%d)\n", static_cast<int>(st));  // -127 / 85 / NaN: không ghi, không gửi
-    } else if (!g_platform.clockTrusted()) {
-      Serial.println("[sensor] chua co gio, bo so do");  // không ghi số đo khi chưa biết giờ
-    } else {
-      const int16_t centi = auhono::celsiusToCenti(c);
-      g_buffer.push(auhono::Reading{g_platform.unixNow(), centi});
-      g_policy.noteReading(g_thresholds.outOfRange(centi));
-    }
+    onSensorResult(g_sensor.read(), now);
+  }
+  if (g_conversionPending) return;
+  if (g_confirmPending && reached(now, g_confirmAt)) {  // đo lại để xác nhận số đo nghi ngờ (không dời nhịp đo chính)
+    g_confirmPending = false;
+    startConversion(now);
+    return;
   }
   if (reached(now, g_nextSampleAt)) {
     // Cộng dồn để không trôi nhịp; nếu bị trễ nhiều (vd. đang tải OTA) thì đo ngay rồi tính lại.
     g_nextSampleAt += cfg::kSampleIntervalMs;
     if (reached(now, g_nextSampleAt)) g_nextSampleAt = now + cfg::kSampleIntervalMs;
-    g_sensor.startConversion();
-    g_conversionPending = true;
-    g_conversionReadyAt = now + cfg::kSensorConversionMs;
+    g_confirmPending = false;
+    startConversion(now);
   }
 }
 
 static void handleUpload(uint32_t now) {
   if (!g_uploader || !g_wifi.connected() || !g_platform.clockTrusted()) return;
 
+  if (!g_uploadGateArmed) {  // lần đầu sau khởi động có thể gửi: rải ngẫu nhiên 0-20 s theo từng máy (thundering herd)
+    g_uploadGateArmed = true;
+    const uint32_t jitter = g_rng.next() % cfg::kUploadStartJitterMaxMs;
+    g_policy.delayStart(now, jitter);
+    Serial.printf("[upload] gui lan dau sau %lu ms\n", static_cast<unsigned long>(jitter));
+  }
+
   const auhono::UploadReason reason = g_policy.poll(now, !g_buffer.empty());
   if (reason == auhono::UploadReason::None) return;
 
   const auhono::FlushResult f = g_uploader->flush();
   if (f.thresholdsChanged) saveThresholds(g_thresholds);  // chỉ ghi flash khi ngưỡng thật sự đổi
-  if (f.reachedServer) {
-    g_serverContact = true;
-    g_lastContactMs = now;
-    markAppValid();
+  if (f.staleDropped > 0 || f.discardedReadings > 0 || f.serverDroppedReadings > 0) {
+    Serial.printf("[upload] bo: qua cu %u, bi server tu choi %u, server khong nhan %u\n", static_cast<unsigned>(f.staleDropped),
+                  static_cast<unsigned>(f.discardedReadings), static_cast<unsigned>(f.serverDroppedReadings));
   }
+  if (f.clockNotReady) {  // race hiếm: giờ vừa mất tính hợp lý; không tính là lỗi mạng
+    g_policy.onFailure(now, 5000);
+    return;
+  }
+  g_rescue.onAttempt(f.ok && f.reachedServer, f.certError, f.lastStatus > 0);
+  if (g_http.takeHeapLow()) g_lowStrikes = g_lowStrikes < 255 ? g_lowStrikes + 1 : 255;
+  if (f.reachedServer) noteContact(now);
 
+  g_lastUploadOk = f.ok;
   if (f.ok) {
-    g_uploadBackoff.reset();
+    g_retry.reset();
     g_uploadStatus = auhono::UploadStatus::Ok;
-    if (f.remaining > 0) g_policy.onFailure(now, 2000);  // còn dữ liệu (chạm giới hạn gói): gửi tiếp sớm
+    if (f.remaining > 0) g_policy.onFailure(now, cfg::kUploadContinueMs);  // còn dữ liệu (chạm giới hạn gói/thời gian): gửi tiếp sớm
     else g_policy.onSuccess();
   } else {
     g_uploadStatus = auhono::UploadStatus::Failed;
-    const uint32_t delay = g_uploadBackoff.nextDelayMs();  // 30 s -> 1 -> 2 -> 5 phút, ±20%
-    g_policy.onFailure(now, delay);
-    Serial.printf("[upload] loi (%d), thu lai sau %lu ms, con %u so do\n", static_cast<int>(f.lastKind),
-                  static_cast<unsigned long>(delay), static_cast<unsigned>(f.remaining));
+    // 30 s -> 5 phút cho lỗi mạng/5xx; 5 phút -> 1 giờ cho 401/429/403/... (không gõ cửa server dồn dập)
+    const uint32_t delayMs = g_retry.nextDelayMs(f.failClass);
+    g_policy.onFailure(now, delayMs);
+    Serial.printf("[upload] loi (loai %d, http %d), thu lai sau %lu ms, con %u so do\n", static_cast<int>(f.lastKind), f.lastStatus,
+                  static_cast<unsigned long>(delayMs), static_cast<unsigned>(f.remaining));
   }
 }
 
+/// Gọi liên tục khi đang tải OTA (vòng lặp chính bị chiếm): giữ nhịp đo. Trả false để HỦY tải khi vừa có số đo vượt ngưỡng.
+static bool otaTick(void*) {
+  const uint32_t now = millis();
+  handleSampling(now);
+  auhono::LedInputs led;
+  led.hasIdentity = g_identity.valid;
+  led.wifiConnected = g_wifi.connected();
+  led.upload = g_uploadStatus;
+  g_led.update(now, led);
+  return !breachActive();
+}
+
 static void handleOta(uint32_t now) {
-  if (!g_client || !g_wifi.connected() || !g_serverContact || !reached(now, g_nextOtaAt)) return;
+  if (!g_client || !g_wifi.connected() || !g_platform.clockTrusted() || !reached(now, g_nextOtaAt)) return;
+  const bool needConfirm = g_appPendingVerify && !g_appMarkedValid;
+  const bool rescue = g_rescue.rescueAllowed();
+  // Kiểm tra định kỳ chỉ sau khi đã liên lạc được server; riêng bản mới chờ xác nhận thì dùng chính yêu cầu kiểm tra
+  // (có ký) làm bằng chứng liên lạc, kể cả khi cảm biến hỏng và không có số đo nào để gửi.
+  if (!g_serverContact && !needConfirm && !rescue) return;
+  if (g_platform.monoSeconds() < 30) return;
+
   g_nextOtaAt = now + cfg::kOtaCheckIntervalMs;  // đặt trước: lỗi cũng không hỏi dồn dập
 
-  switch (otaCheckAndUpdate(*g_client, g_platform)) {
+  if (rescue) Serial.println("[ota] CHE DO CUU HO: chung chi TLS hong keo dai, chi kiem tra/tai OTA (co chu ky) khong xac thuc chung chi");
+  g_http.setInsecureRescue(rescue);
+
+  OtaContext ctx;
+  ctx.bufferCount = g_buffer.size();
+  ctx.breachActive = breachActive();
+  ctx.lastUploadOk = g_lastUploadOk;
+  ctx.uptimeS = g_platform.monoSeconds();
+  ctx.portalActive = g_portal.active();
+  ctx.ledger = &g_ota;
+  ctx.tick = otaTick;
+  const OtaOutcome outcome = otaCheckAndUpdate(*g_client, g_platform, ctx, rescue);
+  g_http.setInsecureRescue(false);
+
+  const auhono::HttpResponse& last = g_client->lastResponse();
+  if (rescue) g_rescue.onAttempt(ctx.contacted, last.certError, last.status > 0);
+  if (ctx.contacted) noteContact(now);
+
+  switch (outcome) {
     case OtaOutcome::Installed:
-      Serial.println("[ota] da cai, khoi dong lai");
-      delay(500);
-      ESP.restart();
+      rebootWithReason(auhono::RebootReason::OtaInstalled);
+      break;
+    case OtaOutcome::Deferred:
+      g_nextOtaAt = now + cfg::kOtaDeferredRetryMs;  // gửi số đo trước, hỏi lại sớm
+      break;
+    case OtaOutcome::CheckFailed:
+      g_nextOtaAt = now + ((needConfirm || rescue) ? cfg::kOtaDeferredRetryMs * 2 : cfg::kOtaCheckIntervalMs / 6);
       break;
     case OtaOutcome::Rejected:
-      Serial.println("[ota] ban tai ve bi tu choi, giu ban hien tai");
+      Serial.println("[ota] khong cai duoc, giu ban hien tai");
       break;
     default:
       break;
   }
 }
 
-/// Lưới an toàn cuối: không liên lạc được server quá lâu (kể cả khi Wi-Fi báo "đã nối") thì khởi động lại;
-/// và bản OTA mới không liên lạc được server trong kRollbackWindowMs thì quay về bản cũ.
-static void handleSelfHeal(uint32_t now) {
-  if (g_appPendingVerify && !g_appMarkedValid && reached(now, cfg::kRollbackWindowMs)) {
-    Serial.println("[ota] ban moi khong lien lac duoc server: quay ve ban cu");
-    esp_ota_mark_app_invalid_rollback_and_reboot();  // không trả về nếu có bản cũ hợp lệ
-    g_appPendingVerify = false;                      // không rollback được: tiếp tục chạy như bình thường
+/// Lưới an toàn cuối cùng: heap, khởi động lại theo kế hoạch, cứu hộ kết nối, rollback bản OTA mới không sống được.
+static void handleMaintenance(uint32_t now) {
+  const uint32_t uptimeS = g_platform.monoSeconds();
+  const bool wifiUp = g_wifi.connected();
+  const uint32_t sinceContactS = wifiUp ? static_cast<uint32_t>(now - g_contactRefMs) / 1000 : 0;
+
+  // 1. Heap: mỗi 30 s. "Không đủ mở TLS" kéo dài 10 phút, hoặc "nguy kịch" 3 lần liên tiếp -> khởi động lại có lý do.
+  if (reached(now, g_nextHeapCheckAt)) {
+    g_nextHeapCheckAt = now + cfg::kHeapCheckIntervalMs;
+    const uint32_t freeHeap = ESP.getFreeHeap();
+    const uint32_t maxBlock = ESP.getMaxAllocHeap();
+    g_critStrikes = auhono::heapCritical(freeHeap, maxBlock) ? (g_critStrikes < 255 ? g_critStrikes + 1 : 255) : 0;
+    if (auhono::tlsHeapOk(freeHeap, maxBlock)) g_lowStrikes = 0;
+    else if (g_lowStrikes < 255) ++g_lowStrikes;
+    if (reached(now, g_nextHeapLogAt)) {
+      g_nextHeapLogAt = now + cfg::kHeapLogIntervalMs;
+      Serial.printf("[heap] free %u, khoi lon nhat %u, thap nhat tu luc bat %u, uptime %lu s\n", static_cast<unsigned>(freeHeap),
+                    static_cast<unsigned>(maxBlock), static_cast<unsigned>(ESP.getMinFreeHeap()), static_cast<unsigned long>(uptimeS));
+    }
   }
-  if (g_uploader && g_wifi.connected() && static_cast<uint32_t>(now - g_lastContactMs) > cfg::kNoContactRestartMs) {
-    Serial.println("[heal] qua lau khong lien lac duoc server: khoi dong lai");
-    ESP.restart();
+  const bool heapBad = g_critStrikes >= auhono::kMaxLowHeapStrikes || g_lowStrikes >= cfg::kLowHeapStrikesNotCritical;
+
+  // 2. Bản OTA mới chưa xác nhận mà không liên lạc được server: quay về bản cũ.
+  if (g_appPendingVerify && !g_appMarkedValid) {
+    const uint32_t wifiUpNoContactS = (wifiUp && !g_serverContact) ? sinceContactS : 0;
+    if (auhono::shouldRollbackUnconfirmed(true, uptimeS, wifiUpNoContactS)) {
+      Serial.println("[ota] ban moi khong lien lac duoc server: quay ve ban cu");
+      saveRebootReason(auhono::RebootReason::Rollback);
+      esp_ota_mark_app_invalid_rollback_and_reboot();  // không trả về nếu có bản cũ hợp lệ
+      if (!softRollback()) g_appPendingVerify = false;  // không rollback được: tiếp tục chạy như bình thường
+    }
   }
+
+  // 3. Mất liên lạc với server dù Wi-Fi báo nối: leo thang không mất số đo (nối lại Wi-Fi 30 phút, khởi động lại driver 2 giờ).
+  if (g_uploader && wifiUp) {
+    switch (auhono::nextRecoveryStep(sinceContactS, g_recoveryStage)) {
+      case auhono::RecoveryStep::CycleWifi: g_wifi.forceReconnect(now); break;
+      case auhono::RecoveryStep::RestartWifiDriver: g_wifi.restartDriver(now); break;
+      default: break;
+    }
+  }
+
+  // 4. Khởi động lại có lý do (heap, 12 giờ không liên lạc, định kỳ 7/14 ngày khi rảnh).
+  auhono::MaintenanceInputs in;
+  in.uptimeS = uptimeS;
+  in.bufferCount = g_buffer.size();
+  in.lastUploadOk = g_lastUploadOk;
+  in.sinceContactS = sinceContactS;
+  in.wifiUp = wifiUp && g_uploader;
+  in.breachActive = breachActive();
+  in.portalActive = g_portal.active();
+  in.otaBusy = false;  // OTA chạy đồng bộ trong handleOta(), nên khi tới đây không có OTA đang dở
+  in.lowHeapStrikes = heapBad ? auhono::kMaxLowHeapStrikes : 0;
+  const auhono::RebootReason why = auhono::decideReboot(in);
+  if (why != auhono::RebootReason::None) rebootWithReason(why);
 }
 
 // ── Arduino ────────────────────────────────────────────────────────────────
@@ -268,11 +533,30 @@ void setup() {
   storageBegin();
   g_platform.begin();  // callback NTP + watchdog
 
+  // Lý do reset: cúp điện, brownout (cục sạc yếu), watchdog, panic... Nếu là brownout: giảm công suất phát Wi-Fi ở lần chạy này
+  // (dòng đỉnh thấp hơn) để thoát vòng reset. Không ghi flash gì ở lúc khởi động ngoài việc xóa cờ "lý do chủ động" (nếu có).
+  const esp_reset_reason_t rr = esp_reset_reason();
+  const auhono::RebootReason why = takeRebootReason();
   g_identity = loadIdentity();
-  g_thresholds = loadThresholds();
   Serial.printf("\nAuhono fw %s, thiet bi %s\n", AUHONO_FW_VERSION, g_identity.valid ? g_identity.deviceId.c_str() : "(chua nap danh tinh)");
+  Serial.printf("[boot] ly do reset: %s%s%s\n", resetReasonText(rr), (rr == ESP_RST_SW && why != auhono::RebootReason::None) ? " - " : "",
+                (rr == ESP_RST_SW && why != auhono::RebootReason::None) ? auhono::rebootReasonText(why) : "");
+  if (rr == ESP_RST_BROWNOUT) {
+    Serial.println("[boot] canh bao: nguon sut ap. Doi cuc sac >= 5V/1A, them tu 470uF gan bo mach. Giam cong suat Wi-Fi.");
+    WifiManager::setLowPower(true);
+  }
+  Serial.printf("[boot] heap free %u, khoi lon nhat %u\n", static_cast<unsigned>(ESP.getFreeHeap()), static_cast<unsigned>(ESP.getMaxAllocHeap()));
+
+  g_thresholds = loadThresholds();
 
   if (g_identity.valid) {
+    // Hạt giống riêng từng máy: mã thiết bị + MAC, để 30 máy khởi động cùng lúc không trùng nhịp (backoff, trễ gửi đầu tiên).
+    const uint64_t mac = ESP.getEfuseMac();
+    uint8_t macBytes[8];
+    for (int i = 0; i < 8; i++) macBytes[i] = static_cast<uint8_t>(mac >> (8 * i));
+    g_rng.reseed(auhono::fnv1a32(reinterpret_cast<const uint8_t*>(g_identity.deviceId.data()), g_identity.deviceId.size(),
+                                 auhono::fnv1a32(macBytes, sizeof macBytes)));
+
     g_seq.begin();
     g_signer.reset(new auhono::Signer(g_crypto, g_identity.deviceId, g_identity.key));
     g_client.reset(new auhono::DeviceClient(*g_signer, g_seq, g_platform, g_http));
@@ -280,10 +564,15 @@ void setup() {
     memset(g_identity.key, 0, sizeof g_identity.key);  // Signer đã giữ bản sao; xóa bản trong biến toàn cục
   }
 
-  // Bản OTA mới đang chờ xác nhận?
-  esp_ota_img_states_t state;
-  if (esp_ota_get_state_partition(esp_ota_get_running_partition(), &state) == ESP_OK) {
-    g_appPendingVerify = (state == ESP_OTA_IMG_PENDING_VERIFY);
+  // OTA: bản mới đang chờ xác nhận? Rollback mềm nếu nó đã khởi động quá nhiều lần mà chưa liên lạc được server.
+  esp_ota_img_states_t otaState;
+  if (esp_ota_get_state_partition(esp_ota_get_running_partition(), &otaState) == ESP_OK) {
+    g_appPendingVerify = (otaState == ESP_OTA_IMG_PENDING_VERIFY);
+  }
+  g_ota.load();
+  if (g_ota.onBoot(AUHONO_FW_VERSION) == auhono::OtaLedger::BootVerdict::Rollback) {
+    Serial.println("[ota] ban moi khoi dong nhieu lan ma chua xac nhan: rollback mem");
+    if (!softRollback()) Serial.println("[ota] khong rollback duoc, tiep tuc chay");
   }
 
   g_sensor.begin();
@@ -293,10 +582,14 @@ void setup() {
   if (g_hasWifiCreds) {
     g_wifi.begin(creds, now);
   } else {
-    startPortal(now);  // lần đầu cắm điện: phát Wi-Fi cấu hình
+    startPortal(now, false);  // lần đầu cắm điện: phát Wi-Fi cấu hình
   }
-  g_nextSampleAt = now;
-  g_lastContactMs = now;
+  g_nextSampleAt = now;      // đo NGAY (số đo sau khi có điện lại rất quan trọng); giờ unix chưa cần: số đo mang giờ đơn điệu
+  g_contactRefMs = now;
+  g_nextOtaAt = now;               // (không dựa vào giá trị khởi tạo 0: phép so sánh int32 chỉ đúng trong ~24,8 ngày)
+  g_nextTimeFallbackAt = now;
+  g_nextHeapCheckAt = now + cfg::kHeapCheckIntervalMs;
+  g_nextHeapLogAt = now + cfg::kHeapLogIntervalMs;
 }
 
 void loop() {
@@ -306,23 +599,18 @@ void loop() {
   handleButton(now);
   g_wifi.loop(now);
   handlePortal(now);
-
-  // Mất Wi-Fi đã lưu quá lâu (vd. đổi modem): mở lại cổng cấu hình để chủ quán tự sửa.
-  if (!g_portal.active() && g_hasWifiCreds && g_wifi.disconnectedForMs(now) > cfg::kWifiFailToPortalMs) {
-    g_wifi.resetDisconnectTimer(now);
-    startPortal(now);
-  }
-
   handleClock(now);
   handleSampling(now);
   handleUpload(now);
   handleOta(now);
-  handleSelfHeal(now);
+  handleMaintenance(now);
 
   auhono::LedInputs led;
   led.hasIdentity = g_identity.valid;
+  led.wipeArmed = g_button.wipeArmed();
   led.portalActive = g_portal.active();
   led.wifiConnected = g_wifi.connected();
+  led.wifiFail = g_wifi.lastFail();
   led.sensorFault = g_health.faulty();
   led.upload = g_uploadStatus;
   g_led.update(now, led);

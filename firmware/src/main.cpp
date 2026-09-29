@@ -15,11 +15,14 @@
 #include <esp_ota_ops.h>
 #include <esp_partition.h>
 #include <esp_system.h>
+#include <WiFi.h>
 #include <sdkconfig.h>
 
 #include <memory>
 
+#include "auhono/ap_credentials.h"
 #include "auhono/button.h"
+#include "auhono/heartbeat.h"
 #include "auhono/jitter_random.h"
 #include "auhono/led.h"
 #include "auhono/maintenance.h"
@@ -67,6 +70,7 @@ static auhono::UploadPolicy g_policy(cfg::kUploadPeriodMs, cfg::kImmediateMinInt
 static auhono::RetryScheduler g_retry(g_rng);
 static auhono::Backoff g_timeBackoff(g_rng);
 static auhono::SensorHealth g_health;
+static auhono::SensorWatch g_watch;      // lần cuối có số đo hợp lệ (nhịp tim khi đầu dò hỏng >= 5 phút)
 static auhono::ReadingFilter g_filter;
 static auhono::ButtonGesture g_button;
 static auhono::TlsRescue g_rescue;
@@ -80,6 +84,8 @@ static Sensor g_sensor;
 static StatusLed g_led;
 
 static Identity g_identity;
+static std::string g_apPassword;           // mật khẩu WPA2 của AP cấu hình, suy ra từ khóa (KHÔNG BAO GIỜ in ra log/trang)
+static const char* g_rstToken = "unknown"; // lý do reset của chip dạng từ khóa ngắn cho diag.rst
 static std::unique_ptr<auhono::Signer> g_signer;
 static std::unique_ptr<auhono::DeviceClient> g_client;
 static std::unique_ptr<auhono::ReadingsUploader> g_uploader;
@@ -179,8 +185,16 @@ static bool softRollback() {
 
 static void startPortal(uint32_t now, bool byUser) {
   if (g_portal.active()) return;
-  Serial.println("[portal] mo Wi-Fi cau hinh");
-  if (!g_portal.start(g_identity.valid ? g_identity.deviceId : std::string(), AUHONO_FW_VERSION, now, byUser)) return;
+#ifndef ALLOW_OPEN_AP
+  // Bản phát hành KHÔNG BAO GIỜ phát Wi-Fi mở: thiếu danh tính/khóa thì không có mật khẩu WPA2 => không mở AP.
+  // Lỗi hiện bằng đèn "3 nháy ngắn" (thiếu danh tính) và log này.
+  if (!g_identity.valid || g_apPassword.empty()) {
+    Serial.println("[portal] LOI: chua nap danh tinh/khoa, khong co mat khau WPA2 nen KHONG mo Wi-Fi cau hinh. Chay tools/flash_identity.py");
+    return;
+  }
+#endif
+  Serial.println("[portal] mo Wi-Fi cau hinh (WPA2)");
+  if (!g_portal.start(g_identity.valid ? g_identity.deviceId : std::string(), g_apPassword, AUHONO_FW_VERSION, now, byUser)) return;
   g_portalAutoCloseAt = 0;
   g_nextPortalStatusAt = 0;
 }
@@ -313,6 +327,7 @@ static void onSensorResult(const SensorSample& s, uint32_t now) {
   switch (g_filter.onSample(s.centi, mono)) {
     case auhono::Verdict::Accept: {
       g_health.onGood();
+      g_watch.onValidReading(mono);
       g_buffer.push(auhono::Reading{mono, s.centi});
       g_haveLast = true;
       g_lastCenti = s.centi;
@@ -360,9 +375,25 @@ static void handleSampling(uint32_t now) {
   }
 }
 
-/// Gửi số đo trong bộ đệm rồi cập nhật trạng thái/chính sách theo kết quả. Dùng cho cả gửi định kỳ lẫn "gửi trước khi OTA".
-static void flushAndApply(uint32_t now) {
-  const auhono::FlushResult f = g_uploader->flush();
+/// Chẩn đoán kèm mọi gói (docs/PROTOCOL.md "diag"): đầu dò, số giây từ số đo hợp lệ cuối, lý do reset, RSSI, heap, uptime.
+static auhono::Diag makeDiag() {
+  const uint32_t mono = g_platform.monoSeconds();
+  auhono::Diag d;
+  d.hasSensor = true;
+  d.sensorFault = g_watch.faulty(mono);
+  d.hasFaultS = true;
+  d.faultS = g_watch.secondsSinceValid(mono);
+  strncpy(d.rst, g_rstToken, sizeof d.rst - 1);
+  if (g_wifi.connected()) { d.hasRssi = true; d.rssi = static_cast<int>(WiFi.RSSI()); }
+  d.hasHeap = true;
+  d.heap = ESP.getFreeHeap();
+  d.hasUp = true;
+  d.up = mono;
+  return d;
+}
+
+/// Cập nhật trạng thái/chính sách theo kết quả một lần gửi (gói số đo hoặc nhịp tim).
+static void applyResult(uint32_t now, const auhono::FlushResult& f) {
   if (f.thresholdsChanged) saveThresholds(g_thresholds);  // chỉ ghi flash khi ngưỡng thật sự đổi
   if (f.staleDropped > 0 || f.discardedReadings > 0 || f.serverDroppedReadings > 0) {
     Serial.printf("[upload] bo: qua cu %u, bi server tu choi %u, server khong nhan %u\n", static_cast<unsigned>(f.staleDropped),
@@ -374,7 +405,7 @@ static void flushAndApply(uint32_t now) {
   }
   g_rescue.onAttempt(f.ok && f.reachedServer, f.certError, f.lastStatus > 0);
   if (g_http.takeHeapLow()) g_lowStrikes = g_lowStrikes < 255 ? g_lowStrikes + 1 : 255;
-  if (f.reachedServer) noteContact(now);
+  if (f.reachedServer) noteContact(now);  // nhịp tim cũng là "đã liên lạc": không kích hoạt nối lại Wi-Fi/rollback vì đầu dò hỏng
 
   g_lastUploadOk = f.ok;
   if (f.ok) {
@@ -392,6 +423,19 @@ static void flushAndApply(uint32_t now) {
   }
 }
 
+/// Gửi số đo trong bộ đệm (kèm diag). Dùng cho cả gửi định kỳ lẫn "gửi trước khi OTA".
+static void flushAndApply(uint32_t now) {
+  g_uploader->setDiag(makeDiag());
+  applyResult(now, g_uploader->flush());
+}
+
+/// Nhịp tim: readings [] + diag (đầu dò hỏng >= 5 phút, bộ đệm rỗng). Không đụng tới bộ đệm.
+static void heartbeatAndApply(uint32_t now) {
+  Serial.printf("[heartbeat] dau do loi %lu s, gui nhip tim\n", static_cast<unsigned long>(g_watch.secondsSinceValid(g_platform.monoSeconds())));
+  g_uploader->setDiag(makeDiag());
+  applyResult(now, g_uploader->heartbeat());
+}
+
 static void handleUpload(uint32_t now) {
   if (!g_uploader || !g_wifi.connected() || !g_platform.clockTrusted()) return;
 
@@ -402,9 +446,13 @@ static void handleUpload(uint32_t now) {
     Serial.printf("[upload] gui lan dau sau %lu ms\n", static_cast<unsigned long>(jitter));
   }
 
-  const auhono::UploadReason reason = g_policy.poll(now, !g_buffer.empty());
+  // Đầu dò hỏng >= 5 phút cũng là "có việc gửi" (nhịp tim): dùng đúng lịch định kỳ 5 phút + trễ ngẫu nhiên + backoff của UploadPolicy.
+  // Còn số đo trong bộ đệm thì gói số đo (kèm diag) đi trước; nhịp tim chỉ khi bộ đệm rỗng.
+  const bool heartbeatWanted = g_watch.faulty(g_platform.monoSeconds());
+  const auhono::UploadReason reason = g_policy.poll(now, !g_buffer.empty() || heartbeatWanted);
   if (reason == auhono::UploadReason::None) return;
-  flushAndApply(now);
+  if (!g_buffer.empty()) flushAndApply(now);
+  else heartbeatAndApply(now);
 }
 
 /// Gọi liên tục khi đang tải OTA (vòng lặp chính bị chiếm): giữ nhịp đo. Trả false để HỦY tải khi vừa có số đo vượt ngưỡng.
@@ -547,6 +595,7 @@ void setup() {
   // Lý do reset: cúp điện, brownout (cục sạc yếu), watchdog, panic... Nếu là brownout: giảm công suất phát Wi-Fi ở lần chạy này
   // (dòng đỉnh thấp hơn) để thoát vòng reset. Không ghi flash gì ở lúc khởi động ngoài việc xóa cờ "lý do chủ động" (nếu có).
   const esp_reset_reason_t rr = esp_reset_reason();
+  g_rstToken = auhono::resetReasonToken(static_cast<int>(rr));
   const auhono::RebootReason why = takeRebootReason();
   g_identity = loadIdentity();
   Serial.printf("\nAuhono fw %s, thiet bi %s\n", AUHONO_FW_VERSION, g_identity.valid ? g_identity.deviceId.c_str() : "(chua nap danh tinh)");
@@ -572,6 +621,7 @@ void setup() {
     g_signer.reset(new auhono::Signer(g_crypto, g_identity.deviceId, g_identity.key));
     g_client.reset(new auhono::DeviceClient(*g_signer, g_seq, g_platform, g_http));
     g_uploader.reset(new auhono::ReadingsUploader(*g_client, g_buffer, g_thresholds, g_platform, AUHONO_FW_VERSION));
+    g_apPassword = auhono::deriveApPassword(g_crypto, g_identity.key);  // trước khi xóa khóa; giữ 10 ký tự trong RAM
     memset(g_identity.key, 0, sizeof g_identity.key);  // Signer đã giữ bản sao; xóa bản trong biến toàn cục
   }
 

@@ -51,6 +51,15 @@ class ReadingsUploader {
                    IPlatform& platform, const char* firmwareVersion)
       : client_(client), buffer_(buffer), thresholds_(thresholds), platform_(platform), fw_(firmwareVersion) {}
 
+  /// Chẩn đoán kèm mọi gói (số đo và nhịp tim). Gọi trước mỗi flush/heartbeat để giá trị luôn mới. Không gọi = không có diag
+  /// (body giữ nguyên như giao thức cũ).
+  void setDiag(const Diag& d) { diag_ = d; hasDiag_ = true; }
+  void clearDiag() { hasDiag_ = false; }
+
+  /// Gói nhịp tim: `readings: []` + diag (bắt buộc đã setDiag). KHÔNG đụng tới bộ đệm, gửi đúng MỘT request, không chia đôi,
+  /// không bao giờ bỏ gì: 400/413 chỉ là thất bại (Persistent) để tầng trên thử lại chậm. Cùng ký/seq/xử lý giờ như gói số đo.
+  FlushResult heartbeat();
+
   /// Gửi tới khi hết hàng đợi, gặp lỗi, hoặc hết ngân sách. Số đo chỉ bị xóa khỏi bộ đệm SAU khi server
   /// trả 200 (hoặc từ chối vĩnh viễn từng số đo riêng lẻ, xem kMaxPoisonDropsPerFlush).
   ///
@@ -63,6 +72,8 @@ class ReadingsUploader {
   Thresholds& thresholds_;
   IPlatform& platform_;
   const char* fw_;
+  Diag diag_;
+  bool hasDiag_ = false;
 };
 
 }  // namespace auhono

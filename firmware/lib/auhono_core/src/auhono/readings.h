@@ -103,12 +103,37 @@ size_t formatCenti(int16_t centi, char* out, size_t cap);
 /// Số đo tối đa mỗi request theo PROTOCOL.md.
 constexpr size_t kMaxBatch = 20;
 
+/// Chẩn đoán tùy chọn kèm gói (docs/PROTOCOL.md, "Gói nhịp tim và chẩn đoán (diag)"). Trường nào `has*`/không rỗng mới được
+/// phát ra. Thứ tự khóa trong JSON cố định: sensor, fault_s, rst, rssi, heap, up.
+struct Diag {
+  bool hasSensor = false;
+  bool sensorFault = false;   // sensor: "fault" nếu true, "ok" nếu false
+  bool hasFaultS = false;
+  uint32_t faultS = 0;        // giây kể từ số đo hợp lệ cuối cùng (kẹp về 2^31)
+  char rst[17] = {0};         // lý do khởi động lại gần nhất, [A-Za-z0-9_]{1,16}; rỗng = bỏ; chuỗi sai định dạng cũng bị bỏ
+  bool hasRssi = false;
+  int rssi = 0;               // dBm, kẹp về -120..0
+  bool hasHeap = false;
+  uint32_t heap = 0;          // byte trống
+  bool hasUp = false;
+  uint32_t up = 0;            // giây từ lúc khởi động
+};
+
+/// `rst` hợp lệ theo giao thức?
+bool isValidRstToken(const char* s);
+/// Mã lý do reset của ESP-IDF (esp_reset_reason_t: 0 unknown, 1 poweron, 2 ext, 3 sw, 4 panic, 5 int_wdt, 6 task_wdt, 7 wdt,
+/// 8 deepsleep, 9 brownout, 10 sdio) -> từ khóa ngắn chữ thường. Mã lạ -> "unknown".
+const char* resetReasonToken(int espResetReason);
+
 /// Dựng body JSON: {"fw":"1.0.0","readings":[{"t":1800000000,"c":-19.5}]}
 /// `readings[i].t` là giờ UNIX (đã đổi bằng monoToUnix).
 /// - `fw` rỗng/null thì bỏ trường "fw" (khớp vector trong PROTOCOL.md).
 /// - Ký tự lạ trong `fw` bị thay bằng '_' để JSON luôn hợp lệ.
 /// - Không có khoảng trắng thừa. Đây CHÍNH LÀ các byte được ký và gửi.
-/// Trả độ dài body, hoặc 0 nếu `cap` không đủ hoặc n == 0 hoặc n > kMaxBatch.
-size_t buildReadingsBody(char* out, size_t cap, const char* fw, const WireReading* readings, size_t n);
+/// - `diag` (tùy chọn): thêm `,"diag":{...}` SAU readings; không có diag thì các byte giữ nguyên như trước (vector PROTOCOL.md).
+///   Diag không có khóa nào hợp lệ thì bị bỏ hẳn.
+/// - `n == 0` (readings rỗng, gói nhịp tim) chỉ được phép khi có diag hợp lệ.
+/// Trả độ dài body, hoặc 0 nếu `cap` không đủ, n > kMaxBatch, hoặc n == 0 mà không có diag.
+size_t buildReadingsBody(char* out, size_t cap, const char* fw, const WireReading* readings, size_t n, const Diag* diag = nullptr);
 
 }  // namespace auhono

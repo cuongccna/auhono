@@ -55,5 +55,7 @@ if re.search(r"CORE_DEBUG_LEVEL=[1-9]", flags):
     print("\n!!! CANH BAO: CORE_DEBUG_LEVEL > 0: log cua thu vien Arduino co the in SSID/header HTTP (X-Signature). Khong dung cho ban giao khach !!!\n")
 if "ALLOW_INSECURE_TLS" in flags:
     print("\n!!! CANH BAO: ALLOW_INSECURE_TLS dang bat - KHONG xac thuc chung chi server. Chi dung khi phat trien !!!\n")
+if "ALLOW_OPEN_AP" in flags:
+    print("\n!!! CANH BAO: ALLOW_OPEN_AP dang bat - Wi-Fi cau hinh MO, khong mat khau WPA2. Chi dung khi phat trien !!!\n")
 if "example.workers.dev" in flags:
     print("\n!!! CANH BAO: AUHONO_SERVER_URL van la gia tri mau (example.workers.dev). Sua trong platformio.ini !!!\n")

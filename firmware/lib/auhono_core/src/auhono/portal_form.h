@@ -48,7 +48,7 @@ bool resolveSsid(const std::string& typed, const std::string& pickToken, std::st
 std::string sanitizeUtf8(const std::string& in);
 
 /// Tên Wi-Fi cấu hình: "Auhono-" + 4 ký tự cuối của mã thiết bị ("AUH-000001" -> "Auhono-0001").
-/// Mã rỗng/quá ngắn -> "Auhono-0000".
+/// Mã ngắn hơn 4 ký tự -> dùng cả mã ("AB" -> "Auhono-AB", như slice(-4) của máy chủ); mã rỗng -> "Auhono-0000".
 std::string apSsid(const std::string& deviceId);
 
 /// Khớp regex của server: ^[A-Z0-9-]{3,32}$

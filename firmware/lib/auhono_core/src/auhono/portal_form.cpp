@@ -105,8 +105,10 @@ std::string sanitizeUtf8(const std::string& in) {
 }
 
 std::string apSsid(const std::string& deviceId) {
+  // Khớp máy chủ (slice(-4)): 4 ký tự cuối của mã; mã ngắn hơn 4 ký tự thì dùng cả mã (mã hợp lệ có >= 3 ký tự).
+  // Chỉ mã rỗng mới rơi về "0000" để SSID không bao giờ rỗng.
   std::string tail = "0000";
-  if (deviceId.size() >= 4) tail = deviceId.substr(deviceId.size() - 4);
+  if (!deviceId.empty()) tail = deviceId.size() >= 4 ? deviceId.substr(deviceId.size() - 4) : deviceId;
   return "Auhono-" + tail;
 }
 

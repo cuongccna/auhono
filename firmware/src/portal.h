@@ -4,6 +4,7 @@
 // An toàn (xem lib/auhono_core: http_request, url_form, dns_reply, portal_page):
 //  - KHÔNG dùng WebServer/DNSServer của Arduino (không giới hạn kích thước, đọc chặn, DNSServer tràn bộ đệm với gói dị dạng);
 //    bộ phân tích HTTP/DNS tự viết, mọi kích thước bị chặn, thuần C++ đã fuzz trên máy;
+//  - AP là WPA2-PSK, mật khẩu suy ra từ khóa thiết bị (in trên tem/QR); người đứng gần không đổi được Wi-Fi của thiết bị;
 //  - máy chủ chỉ lắng nghe trên IP của AP (192.168.4.1), KHÔNG lộ ra mạng LAN của quán khi STA đang nối;
 //  - mỗi kết nối phải xong trong kPortalRequestDeadlineMs (chống slowloris), tối đa kPortalMaxClients kết nối cùng lúc,
 //    tối đa 4 điện thoại vào AP; không JavaScript, mọi chuỗi động đều escape, CSP nghiêm ngặt, token chống gửi chéo trang;
@@ -18,8 +19,10 @@
 
 class Portal {
  public:
-  /// Mở AP + DNS + HTTP. `byUser`: do người dùng giữ nút (không tự đóng khi Wi-Fi nối lại). false nếu không mở được AP.
-  bool start(const std::string& deviceId, const std::string& fwVersion, uint32_t nowMs, bool byUser);
+  /// Mở AP WPA2-PSK + DNS + HTTP. `apPassword`: 8..63 ký tự (auhono::deriveApPassword); KHÔNG bao giờ được in ra log/trang.
+  /// Mật khẩu rỗng/sai chuẩn => từ chối mở AP (không bao giờ mở Wi-Fi mở), trừ khi biên dịch với -DALLOW_OPEN_AP (chỉ để phát triển).
+  /// `byUser`: do người dùng giữ nút (không tự đóng khi Wi-Fi nối lại). false nếu không mở được AP.
+  bool start(const std::string& deviceId, const std::string& apPassword, const std::string& fwVersion, uint32_t nowMs, bool byUser);
   void stop();
   bool active() const { return impl_ != nullptr; }
 

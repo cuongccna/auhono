@@ -14,6 +14,7 @@ void run_wifi_tests();
 void run_portal_http_tests();
 void run_ota_tests();
 void run_fuzz_tests();
+void run_ap_diag_tests();
 
 void setUp() {}
 void tearDown() {}
@@ -33,5 +34,6 @@ int main(int, char**) {
   run_portal_http_tests();
   run_ota_tests();
   run_fuzz_tests();
+  run_ap_diag_tests();
   return UNITY_END();
 }

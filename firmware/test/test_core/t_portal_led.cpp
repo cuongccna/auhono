@@ -68,7 +68,8 @@ static void test_ap_ssid_and_device_id() {
   TEST_ASSERT_EQUAL_STRING("Auhono-0001", apSsid("AUH-000001").c_str());
   TEST_ASSERT_EQUAL_STRING("Auhono-1234", apSsid("AUH-001234").c_str());
   TEST_ASSERT_EQUAL_STRING("Auhono-0000", apSsid("").c_str());
-  TEST_ASSERT_EQUAL_STRING("Auhono-0000", apSsid("AB").c_str());
+  TEST_ASSERT_EQUAL_STRING("Auhono-AB", apSsid("AB").c_str());
+  TEST_ASSERT_EQUAL_STRING("Auhono-H-12", apSsid("AUH-12").c_str());
   TEST_ASSERT_TRUE(isValidDeviceId("AUH-000001"));
   TEST_ASSERT_FALSE(isValidDeviceId("auh-000001"));
   TEST_ASSERT_FALSE(isValidDeviceId("AB"));

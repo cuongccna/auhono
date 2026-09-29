@@ -6,6 +6,7 @@
 #include <WiFiServer.h>
 #include <WiFiUdp.h>
 #include <esp_random.h>
+#include <esp_wifi.h>
 
 #include <algorithm>
 #include <vector>
@@ -236,16 +237,40 @@ struct Portal::Impl {
   }
 };
 
-bool Portal::start(const std::string& deviceId, const std::string& fwVersion, uint32_t nowMs, bool byUser) {
+bool Portal::start(const std::string& deviceId, const std::string& apPassword, const std::string& fwVersion, uint32_t nowMs, bool byUser) {
   if (impl_) return true;
+
+  // WiFi.softAP() của Arduino-ESP32 2.0.17 im lặng tạo AP MỞ nếu passphrase là NULL hoặc rỗng (wifi_softap_config: authmode = OPEN
+  // trừ khi password[0] != 0), và trả false nếu passphrase dài 1..7. Nên tự kiểm trước, không tin vào giá trị mặc định.
+  const bool passwordOk = auhono::validatePassword(apPassword) == auhono::FormError::None && !apPassword.empty();
+#ifdef ALLOW_OPEN_AP
+#warning "ALLOW_OPEN_AP bat: Wi-Fi cau hinh MO, khong mat khau. Chi dung khi phat trien!"
+  const bool openAp = !passwordOk;
+#else
+  const bool openAp = false;
+  if (!passwordOk) {
+    Serial.println("[portal] LOI: khong co mat khau WPA2 hop le (8-63 ky tu), khong mo AP");
+    return false;
+  }
+#endif
 
   WiFi.persistent(false);
   WiFi.mode(WIFI_AP_STA);  // AP để cấu hình + STA để quét (và để tiếp tục thử nối Wi-Fi đã lưu nếu có)
   const std::string ssid = auhono::apSsid(deviceId);
-  if (!WiFi.softAP(ssid.c_str(), nullptr, 1, 0, 4)) {  // Wi-Fi mở, kênh 1 (tự theo kênh STA khi đã nối), tối đa 4 điện thoại
+  // WPA2-PSK (CCMP; core 2.0.17 tắt TKIP), kênh 1 (tự theo kênh STA khi đã nối), không ẩn, tối đa 4 điện thoại.
+  if (!WiFi.softAP(ssid.c_str(), openAp ? nullptr : apPassword.c_str(), 1, 0, 4)) {
     Serial.println("[portal] khong mo duoc AP");
     WiFi.softAPdisconnect(true);
     return false;
+  }
+  if (!openAp) {
+    // Kiểm lại cấu hình THỰC của driver: phải là WPA2-PSK. Không đúng thì tắt AP ngay (không bao giờ để AP mở chạy).
+    wifi_config_t apCfg = {};
+    if (esp_wifi_get_config(WIFI_IF_AP, &apCfg) != ESP_OK || apCfg.ap.authmode != WIFI_AUTH_WPA2_PSK) {
+      Serial.println("[portal] LOI: AP khong o che do WPA2-PSK, tat AP");
+      WiFi.softAPdisconnect(true);
+      return false;
+    }
   }
   delay(100);  // chờ AP có IP
 

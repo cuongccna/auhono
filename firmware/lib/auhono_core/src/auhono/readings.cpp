@@ -99,6 +99,10 @@ struct Writer {
     buf[len++] = c;
   }
   void put(const char* s) { while (*s) put(*s++); }
+  void putI32(int32_t v) {
+    if (v < 0) { put('-'); putU32(static_cast<uint32_t>(0) - static_cast<uint32_t>(v)); }
+    else putU32(static_cast<uint32_t>(v));
+  }
   void putU32(uint32_t v) {
     char tmp[10];
     int n = 0;
@@ -134,8 +138,59 @@ size_t formatCenti(int16_t centi, char* out, size_t cap) {
   return w.len;
 }
 
-size_t buildReadingsBody(char* out, size_t cap, const char* fw, const WireReading* readings, size_t n) {
-  if (cap == 0 || n == 0 || n > kMaxBatch) return 0;
+bool isValidRstToken(const char* s) {
+  if (!s || !*s) return false;
+  size_t n = 0;
+  for (; s[n]; n++) {
+    const char c = s[n];
+    const bool ok = (c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_';
+    if (!ok || n >= 16) return false;
+  }
+  return true;
+}
+
+const char* resetReasonToken(int r) {
+  switch (r) {
+    case 1:  return "poweron";
+    case 2:  return "ext";
+    case 3:  return "sw";
+    case 4:  return "panic";
+    case 5: case 6: case 7: return "wdt";
+    case 8:  return "deepsleep";
+    case 9:  return "brownout";
+    case 10: return "sdio";
+    default: return "unknown";
+  }
+}
+
+namespace {
+
+/// Ghi khối diag (chỉ khóa đã biết, theo thứ tự cố định). Trả false nếu không có khóa nào (khi đó không ghi gì).
+bool writeDiag(Writer& w, const Diag& d) {
+  const bool hasRst = isValidRstToken(d.rst);
+  if (!d.hasSensor && !d.hasFaultS && !hasRst && !d.hasRssi && !d.hasHeap && !d.hasUp) return false;
+  bool first = true;
+  auto key = [&](const char* k) { if (!first) w.put(','); first = false; w.put('"'); w.put(k); w.put("\":"); };
+  w.put(",\"diag\":{");
+  if (d.hasSensor) { key("sensor"); w.put(d.sensorFault ? "\"fault\"" : "\"ok\""); }
+  if (d.hasFaultS) { key("fault_s"); w.putU32(d.faultS > 0x80000000u ? 0x80000000u : d.faultS); }
+  if (hasRst) { key("rst"); w.put('"'); w.put(d.rst); w.put('"'); }
+  if (d.hasRssi) { key("rssi"); w.putI32(d.rssi < -120 ? -120 : d.rssi > 0 ? 0 : d.rssi); }
+  if (d.hasHeap) { key("heap"); w.putU32(d.heap); }
+  if (d.hasUp) { key("up"); w.putU32(d.up); }
+  w.put('}');
+  return true;
+}
+
+bool hasAnyDiag(const Diag& d) {
+  return d.hasSensor || d.hasFaultS || isValidRstToken(d.rst) || d.hasRssi || d.hasHeap || d.hasUp;
+}
+
+}  // namespace
+
+size_t buildReadingsBody(char* out, size_t cap, const char* fw, const WireReading* readings, size_t n, const Diag* diag) {
+  const bool withDiag = diag && hasAnyDiag(*diag);
+  if (cap == 0 || n > kMaxBatch || (n == 0 && !withDiag)) return 0;
   Writer w{out, cap};
   w.put('{');
   if (fw && *fw) {
@@ -155,7 +210,9 @@ size_t buildReadingsBody(char* out, size_t cap, const char* fw, const WireReadin
     w.put(num);
     w.put('}');
   }
-  w.put("]}");
+  w.put(']');
+  if (withDiag) writeDiag(w, *diag);
+  w.put('}');
   if (w.overflow) return 0;
   out[w.len] = '\0';
   return w.len;

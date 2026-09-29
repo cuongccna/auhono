@@ -9,6 +9,39 @@ beforeEach(() => {
 const json = async (r: Response) => (await r.json()) as Record<string, any>;
 
 describe('xác thực chủ quán', () => {
+  it('Zalo đang lỗi (mạng/5xx/429) => 503 auth_unavailable, KHÔNG phải 401', async () => {
+    const { AuthUnavailableError, zaloVerifier } = await import('../src/owner-auth.ts');
+    for (const f of [
+      (async () => { throw new Error('net'); }) as unknown as typeof fetch,
+      (async () => new Response('bad gateway', { status: 502 })) as unknown as typeof fetch,
+      (async () => new Response('slow down', { status: 429 })) as unknown as typeof fetch,
+    ]) {
+      await expect(zaloVerifier(f)('token-dai-hon-muoi-ky-tu-' + Math.random())).rejects.toBeInstanceOf(AuthUnavailableError);
+    }
+    // Token sai (Zalo trả lỗi 200 có error hoặc 401) => null (401).
+    const bad = (async () => Response.json({ error: -216, message: 'invalid' })) as unknown as typeof fetch;
+    expect(await zaloVerifier(bad)('token-sai-nhung-du-dai-' + Math.random())).toBeNull();
+    const unauth = (async () => new Response('', { status: 401 })) as unknown as typeof fetch;
+    expect(await zaloVerifier(unauth)('token-sai-nhung-du-dai-' + Math.random())).toBeNull();
+  });
+
+  it('app trả 503 khi verifier báo Zalo lỗi', async () => {
+    const { AuthUnavailableError } = await import('../src/owner-auth.ts');
+    const { createApp } = await import('../src/app.ts');
+    const app = createApp({ now: () => NOW, verifyOwner: async () => { throw new AuthUnavailableError('x'); }, notifier: () => h.notifier });
+    const res = await app.request('/v1/devices', { headers: { Authorization: 'Bearer token-du-dai-muoi-ky-tu' } }, testEnv, { waitUntil() {}, passThroughOnException() {} } as never);
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ error: 'auth_unavailable' });
+  });
+
+  it('request lặp lại của cùng chủ quán không ghi lại bảng accounts', async () => {
+    await h.owner('owner-a-token', 'GET', '/v1/devices');
+    const before = await testEnv.DB.prepare('SELECT COUNT(*) n FROM accounts').first<{ n: number }>();
+    for (let i = 0; i < 3; i++) await h.owner('owner-a-token', 'GET', '/v1/devices');
+    const after = await testEnv.DB.prepare('SELECT COUNT(*) n FROM accounts').first<{ n: number }>();
+    expect(after!.n).toBe(before!.n);
+  });
+
   it('thiếu / sai token => 401', async () => {
     expect((await h.request('/v1/devices')).status).toBe(401);
     expect((await h.owner('token-la', 'GET', '/v1/devices')).status).toBe(401);

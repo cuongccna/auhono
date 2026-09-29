@@ -11,7 +11,7 @@ import {
 } from './crypto.ts';
 import { ingest } from './ingest.ts';
 import { dispatchPending, type Notifier } from './notify.ts';
-import { zaloVerifier, type OwnerVerifier } from './owner-auth.ts';
+import { AuthUnavailableError, zaloVerifier, type OwnerVerifier } from './owner-auth.ts';
 import { resetStateStmt } from './db.ts';
 import { KIND_PRESETS, type DeviceRow, type Env } from './types.ts';
 
@@ -180,17 +180,30 @@ export function createApp(deps: Deps) {
 
   async function ownerAuth(c: Ctx, next: () => Promise<void>) {
     const m = /^Bearer (.{10,2048})$/.exec(c.req.header('Authorization') ?? '');
-    const user = m ? await deps.verifyOwner(m[1]!) : null;
+    let user: Awaited<ReturnType<OwnerVerifier>> = null;
+    try {
+      user = m ? await deps.verifyOwner(m[1]!) : null;
+    } catch (err) {
+      if (err instanceof AuthUnavailableError) return c.json({ error: 'auth_unavailable' }, 503);
+      throw err;
+    }
     if (!user) return c.json({ error: 'unauthorized' }, 401);
-    const row = await c.env.DB
-      .prepare(
-        `INSERT INTO accounts (zalo_id, name, created_at) VALUES (?1, ?2, ?3)
-         ON CONFLICT(zalo_id) DO UPDATE SET name = COALESCE(?2, name)
-         RETURNING id`,
-      )
-      .bind(user.id, user.name, deps.now())
-      .first<{ id: number }>();
-    c.set('accountId', row!.id);
+    // Đọc trước, chỉ ghi khi tài khoản mới hoặc đổi tên (tiết kiệm lượt ghi D1: mỗi request app đều đi qua đây).
+    const db = c.env.DB;
+    const existing = await db.prepare('SELECT id, name FROM accounts WHERE zalo_id = ?').bind(user.id).first<{ id: number; name: string | null }>();
+    if (existing && (user.name === null || existing.name === user.name)) {
+      c.set('accountId', existing.id);
+    } else {
+      const row = await db
+        .prepare(
+          `INSERT INTO accounts (zalo_id, name, created_at) VALUES (?1, ?2, ?3)
+           ON CONFLICT(zalo_id) DO UPDATE SET name = COALESCE(?2, name)
+           RETURNING id`,
+        )
+        .bind(user.id, user.name, deps.now())
+        .first<{ id: number }>();
+      c.set('accountId', row!.id);
+    }
     await next();
   }
 

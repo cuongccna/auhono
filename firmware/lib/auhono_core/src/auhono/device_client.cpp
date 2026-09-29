@@ -5,7 +5,7 @@
 namespace auhono {
 
 ServerReply DeviceClient::call(const std::string& method, const std::string& pathAndQuery,
-                               const uint8_t* body, size_t bodyLen) {
+                               const uint8_t* body, size_t bodyLen, bool requireOkField) {
   ServerReply reply;
   for (int attempt = 0; attempt < kMaxAttempts; attempt++) {
     platform_.feedWatchdog();
@@ -19,7 +19,7 @@ ServerReply DeviceClient::call(const std::string& method, const std::string& pat
     req.headers = signer_.sign(method, pathAndQuery, platform_.unixNow(), seq_.next(), body, bodyLen);
 
     last_ = http_.perform(req);
-    reply = parseReply(last_.status, last_.body.data(), last_.body.size());
+    reply = parseReply(last_.status, last_.body.data(), last_.body.size(), requireOkField);
 
     if (reply.kind == ReplyKind::Ok) {
       if (reply.hasServerTime &&

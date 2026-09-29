@@ -265,7 +265,9 @@ static void test_sync_time_from_server_unsigned() {
 static void test_signed_get_ota_check_has_empty_body() {
   Rig r;
   r.http.script.push_back({200, "{\"update\":false}"});
-  r.client->call("GET", "/v1/ota/check?current=1.0.0", nullptr, 0);
+  const ServerReply reply = r.client->call("GET", "/v1/ota/check?current=1.0.0", nullptr, 0, false);
+  TEST_ASSERT_EQUAL(ReplyKind::Ok, reply.kind);  // {"update":false} không có "ok": vẫn là 200 hợp lệ
+  TEST_ASSERT_EQUAL_STRING("{\"update\":false}", r.client->lastResponse().body.c_str());
   TEST_ASSERT_EQUAL_UINT(1, r.http.log.size());
   TEST_ASSERT_EQUAL_UINT(0, r.http.log[0].req.bodyLen);
   TEST_ASSERT_EQUAL_STRING(expectedSig(r, r.http.log[0]).c_str(), r.http.log[0].req.headers.signature.c_str());

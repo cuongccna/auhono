@@ -81,8 +81,14 @@ Có ký (body rỗng). Trả `{"update":false}` hoặc:
 { "update": true, "version": "1.0.1", "url": "https://…/fw.bin", "sha256": "…", "signature": "…" }
 ```
 
-Chip tải `url`, kiểm `sha256` **và chữ ký Ed25519** (khóa công khai nhúng trong firmware) rồi mới cài.
+Chip tải `url` (bắt buộc `https://`), kiểm `sha256` **và chữ ký** rồi mới cài; sai một trong hai thì hủy, giữ bản đang chạy.
 Nếu không kiểm chữ ký firmware thì khóa HMAC của thiết bị không còn ý nghĩa bảo vệ.
+
+- `sha256`: hex thường 64 ký tự của SHA-256(file `.bin`).
+- `signature`: ECDSA **P-256 (secp256r1) / SHA-256** ký lên toàn bộ nội dung file `.bin`, mã hóa **DER**
+  (ASN.1 SEQUENCE{r,s}, 70–72 byte) viết thành hex thường. Khóa công khai (PEM SPKI, `firmware/keys/ota_public.pem`)
+  nhúng vào firmware lúc build.
+- Ký bằng `firmware/tools/ota_sign.py`; script in sẵn câu `INSERT INTO firmware_releases`.
 
 ## Nhịp gửi khuyến nghị
 

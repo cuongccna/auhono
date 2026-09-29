@@ -56,8 +56,9 @@ class DeviceClient {
   ///  - ClockSkew: đặt lại đồng hồ theo server_time rồi gửi lại.
   ///  - Replay: seq = max(seq, last_seq) rồi gửi lại.
   /// Trả phản hồi cuối cùng (có thể vẫn là lỗi nếu hết số lần thử).
+  /// `requireOkField`: xem parseReply(). Đặt false cho GET /v1/ota/check.
   ServerReply call(const std::string& method, const std::string& pathAndQuery, const uint8_t* body,
-                   size_t bodyLen);
+                   size_t bodyLen, bool requireOkField = true);
 
   /// GET /v1/time (không ký) để chỉnh giờ khi NTP lỗi. true nếu đã chỉnh được đồng hồ.
   bool syncTimeFromServer();

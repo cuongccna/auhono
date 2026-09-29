@@ -35,7 +35,10 @@ struct ServerReply {
 };
 
 /// `status` <= 0 nghĩa là lỗi mạng (HTTPClient trả mã âm).
-ServerReply parseReply(int status, const char* body, size_t len);
+/// `requireOkField`: với 200, đòi body là JSON có "ok":true (đúng cho POST /v1/readings). Đặt false
+/// cho endpoint có dạng phản hồi khác (GET /v1/ota/check); khi đó chỉ mã 200 được xét và
+/// body do người gọi tự kiểm tra (parseOtaManifest).
+ServerReply parseReply(int status, const char* body, size_t len, bool requireOkField = true);
 
 /// Kết quả của GET /v1/time: {"server_time":N}
 bool parseServerTime(const char* body, size_t len, uint64_t& serverTime);

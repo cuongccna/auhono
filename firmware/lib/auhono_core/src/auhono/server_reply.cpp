@@ -18,7 +18,7 @@ bool isVersionChar(char c) {
 
 }  // namespace
 
-ServerReply parseReply(int status, const char* body, size_t len) {
+ServerReply parseReply(int status, const char* body, size_t len, bool requireOkField) {
   ServerReply r;
   r.status = status;
   if (status <= 0) { r.kind = ReplyKind::NetworkError; return r; }
@@ -30,6 +30,7 @@ ServerReply parseReply(int status, const char* body, size_t len) {
 
   switch (status) {
     case 200: {
+      if (!requireOkField) { r.kind = ReplyKind::Ok; return r; }
       bool ok = false;
       // Bắt buộc có "ok":true: tránh nhầm với trang HTML/JSON của mạng Wi-Fi công cộng.
       if (!json.valid() || !json.getBool("ok", ok) || !ok) { r.kind = ReplyKind::Unknown; return r; }

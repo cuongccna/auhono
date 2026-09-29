@@ -45,6 +45,13 @@ static void test_200_without_ok_true_is_not_success() {
   TEST_ASSERT_EQUAL(ReplyKind::Unknown, parse(200, "{\"accepted\":1}").kind);
 }
 
+static void test_200_without_ok_field_accepted_when_not_required() {
+  const std::string b = "{\"update\":false}";
+  TEST_ASSERT_EQUAL(ReplyKind::Ok, parseReply(200, b.data(), b.size(), false).kind);
+  TEST_ASSERT_EQUAL(ReplyKind::Unknown, parseReply(200, b.data(), b.size(), true).kind);
+  TEST_ASSERT_EQUAL(ReplyKind::Unauthorized, parseReply(401, "", 0, false).kind);  // lỗi vẫn được phân loại
+}
+
 static void test_clock_skew() {
   const ServerReply r = parse(401, "{\"error\":\"clock_skew\",\"server_time\":1800000123}");
   TEST_ASSERT_EQUAL(ReplyKind::ClockSkew, r.kind);
@@ -177,6 +184,7 @@ void run_reply_tests() {
   RUN_TEST(test_ok_reply_fractional_thresholds);
   RUN_TEST(test_ok_reply_with_insane_config_is_ignored);
   RUN_TEST(test_200_without_ok_true_is_not_success);
+  RUN_TEST(test_200_without_ok_field_accepted_when_not_required);
   RUN_TEST(test_clock_skew);
   RUN_TEST(test_unauthorized_variants);
   RUN_TEST(test_replay);

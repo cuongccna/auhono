@@ -1,0 +1,7 @@
+# Bảng phân vùng cho ESP32-C3 flash 4 MB, hai khe OTA (app0/app1) để cập nhật từ xa an toàn.
+# Name,    Type, SubType, Offset,   Size,     Ghi chú
+nvs,       data, nvs,     0x9000,   0x5000,   # Wi-Fi đã lưu, ngưỡng, trần seq (xóa được khi reset)
+otadata,   data, ota,     0xe000,   0x2000,   # đánh dấu khe khởi động + trạng thái rollback
+app0,      app,  ota_0,   0x10000,  0x1F0000, # ~1,94 MB mỗi khe
+app1,      app,  ota_1,   0x200000, 0x1F0000,
+ident,     data, nvs,     0x3F0000, 0x4000,   # DANH TÍNH: mã thiết bị + khóa 32 byte (nạp lúc ráp, chỉ đọc lúc chạy)

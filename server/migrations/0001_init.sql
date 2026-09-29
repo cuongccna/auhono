@@ -96,7 +96,7 @@ CREATE TABLE kv (
   updated_at INTEGER NOT NULL
 );
 
--- Bản firmware cho OTA. Chip tự kiểm tra sha256 + chữ ký Ed25519 trước khi cài.
+-- Bản firmware cho OTA. Chip tự kiểm tra sha256 + chữ ký ECDSA P-256 (DER, hex) trước khi cài.
 CREATE TABLE firmware_releases (
   version    TEXT PRIMARY KEY,
   url        TEXT NOT NULL,

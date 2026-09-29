@@ -137,15 +137,51 @@ static void test_button_gestures() {
   TEST_ASSERT_EQUAL(ButtonEvent::None, b.update(false, 0));
   TEST_ASSERT_EQUAL(ButtonEvent::None, b.update(true, 1000));
   TEST_ASSERT_EQUAL(ButtonEvent::None, b.update(true, 5999));
-  TEST_ASSERT_EQUAL(ButtonEvent::LongPress, b.update(true, 6000));   // 5 s
+  TEST_ASSERT_EQUAL(ButtonEvent::LongPress, b.update(true, 6000));   // 5 s: mở cổng cấu hình
   TEST_ASSERT_EQUAL(ButtonEvent::None, b.update(true, 7000));        // chỉ phát một lần
-  TEST_ASSERT_EQUAL(ButtonEvent::VeryLongPress, b.update(true, 16000));  // 15 s
-  TEST_ASSERT_EQUAL(ButtonEvent::None, b.update(true, 20000));
-  TEST_ASSERT_EQUAL(ButtonEvent::None, b.update(false, 21000));
+  TEST_ASSERT_FALSE(b.wipeArmed());
+  TEST_ASSERT_EQUAL(ButtonEvent::None, b.update(true, 16000));       // 15 s: KHÔNG xóa ngay, chỉ "lên cò"
+  TEST_ASSERT_TRUE(b.wipeArmed());
+  TEST_ASSERT_EQUAL(ButtonEvent::VeryLongPress, b.update(false, 21000));  // xóa Wi-Fi khi NHẢ nút
+  TEST_ASSERT_FALSE(b.wipeArmed());
   // Nhả ra rồi nhấn lại: bắt đầu tính lại
   TEST_ASSERT_EQUAL(ButtonEvent::None, b.update(true, 22000));
   TEST_ASSERT_EQUAL(ButtonEvent::None, b.update(true, 26999));
   TEST_ASSERT_EQUAL(ButtonEvent::LongPress, b.update(true, 27000));
+}
+
+static void test_button_stuck_never_wipes() {
+  // Nút kẹt sau khi chạy (vỏ hộp ép lên nút): mở cổng cấu hình được (vô hại) nhưng KHÔNG BAO GIỜ xóa Wi-Fi.
+  ButtonGesture b;
+  b.update(false, 0);
+  b.update(true, 1000);
+  TEST_ASSERT_EQUAL(ButtonEvent::LongPress, b.update(true, 6000));
+  b.update(true, 20000);
+  TEST_ASSERT_TRUE(b.wipeArmed());
+  TEST_ASSERT_EQUAL(ButtonEvent::None, b.update(true, 62000));  // > 60 s: kẹt
+  TEST_ASSERT_FALSE(b.wipeArmed());
+  TEST_ASSERT_EQUAL(ButtonEvent::None, b.update(true, 500000));
+  TEST_ASSERT_EQUAL(ButtonEvent::None, b.update(false, 600000));  // cuối cùng nhả ra: vẫn không xóa
+}
+
+static void test_button_held_at_boot_is_ignored_until_release() {
+  ButtonGesture b;
+  TEST_ASSERT_EQUAL(ButtonEvent::None, b.update(true, 0));  // đang bị nhấn ngay lúc bật nguồn
+  TEST_ASSERT_EQUAL(ButtonEvent::None, b.update(true, 6000));
+  TEST_ASSERT_EQUAL(ButtonEvent::None, b.update(true, 20000));
+  TEST_ASSERT_FALSE(b.wipeArmed());
+  TEST_ASSERT_EQUAL(ButtonEvent::None, b.update(false, 21000));
+  // Sau khi nhả, thao tác bình thường hoạt động lại
+  b.update(true, 30000);
+  TEST_ASSERT_EQUAL(ButtonEvent::LongPress, b.update(true, 35000));
+}
+
+static void test_button_release_before_15s_does_not_wipe() {
+  ButtonGesture b;
+  b.update(false, 0);
+  b.update(true, 1000);
+  b.update(true, 6000);
+  TEST_ASSERT_EQUAL(ButtonEvent::None, b.update(false, 14000));  // 13 s: chưa đủ
 }
 
 static void test_button_short_press_does_nothing() {
@@ -168,4 +204,7 @@ void run_portal_led_tests() {
   RUN_TEST(test_led_patterns_are_periodic);
   RUN_TEST(test_button_gestures);
   RUN_TEST(test_button_short_press_does_nothing);
+  RUN_TEST(test_button_stuck_never_wipes);
+  RUN_TEST(test_button_held_at_boot_is_ignored_until_release);
+  RUN_TEST(test_button_release_before_15s_does_not_wipe);
 }

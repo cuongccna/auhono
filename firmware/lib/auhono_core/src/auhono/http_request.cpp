@@ -46,13 +46,15 @@ HttpRequestParser::State HttpRequestParser::feed(const uint8_t* data, size_t len
     }
 
     if (c == '\n') {  // hết dòng (chấp nhận cả LF trần)
-      if (!line_.empty() && line_.back() == '\r') line_.pop_back();
+      pendingCr_ = false;
       if (phase_ == Phase::RequestLine) onRequestLine();
       else onHeaderLine();
       line_.clear();
       continue;
     }
-    if (c == 0) { fail(HttpError::BadRequest); break; }
+    if (pendingCr_) { fail(HttpError::BadRequest); break; }        // CR trần giữa dòng: nghi buôn lậu request
+    if (c == '\r') { pendingCr_ = true; continue; }
+    if ((c < 0x20 && c != '\t') || c == 0x7f) { fail(HttpError::BadRequest); break; }  // ký tự điều khiển (kể cả NUL)
 
     line_.push_back(static_cast<char>(c));
     if (phase_ == Phase::RequestLine) {
@@ -112,12 +114,11 @@ void HttpRequestParser::onHeaderLine() {
   if (name == "host") {
     if (host_.empty() && value.size() <= 100) host_ = value;
   } else if (name == "content-length") {
-    if (value.empty() || value.size() > 9) { fail(HttpError::BadRequest); return; }
+    if (value.empty()) { fail(HttpError::BadRequest); return; }
+    for (char c : value) if (c < '0' || c > '9') { fail(HttpError::BadRequest); return; }
+    if (value.size() > 9) { fail(HttpError::BodyTooLarge); return; }   // số khổng lồ: từ chối ngay, không tính
     size_t v = 0;
-    for (char c : value) {
-      if (c < '0' || c > '9') { fail(HttpError::BadRequest); return; }
-      v = v * 10 + static_cast<size_t>(c - '0');
-    }
+    for (char c : value) v = v * 10 + static_cast<size_t>(c - '0');
     if (haveContentLength_ && v != contentLength_) { fail(HttpError::BadRequest); return; }  // hai giá trị khác nhau: nghi buôn lậu request
     haveContentLength_ = true;
     contentLength_ = v;

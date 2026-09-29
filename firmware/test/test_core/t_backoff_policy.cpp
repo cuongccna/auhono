@@ -22,7 +22,7 @@ static void test_backoff_schedule_and_cap() {
 
 static void test_backoff_jitter_extremes() {
   FakeRandom lo;  lo.v = 0;   lo.step = 0;    // 80%
-  FakeRandom hi;  hi.v = 40;  hi.step = 0;    // 120%
+  FakeRandom hi;  hi.v = 400; hi.step = 0;    // 120%
   Backoff a(lo), c(hi);
   TEST_ASSERT_EQUAL_UINT32(24000, a.nextDelayMs());
   TEST_ASSERT_EQUAL_UINT32(36000, c.nextDelayMs());
@@ -55,7 +55,7 @@ static void test_backoff_reset() {
 static void test_backoff_devices_do_not_sync() {
   // Hai máy với nguồn ngẫu nhiên khác nhau phải cho độ trễ khác nhau (tránh dồn cùng lúc sau mất điện).
   FakeRandom r1, r2;
-  r1.v = 3; r2.v = 29;
+  r1.v = 30; r2.v = 290;
   Backoff a(r1), b(r2);
   TEST_ASSERT_TRUE(a.nextDelayMs() != b.nextDelayMs());
 }

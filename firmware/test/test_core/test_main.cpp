@@ -8,6 +8,11 @@ void run_backoff_policy_tests();
 void run_reply_tests();
 void run_portal_led_tests();
 void run_client_tests();
+void run_sensor_tests();
+void run_scenario_tests();
+void run_wifi_tests();
+void run_portal_http_tests();
+void run_ota_tests();
 
 void setUp() {}
 void tearDown() {}
@@ -21,5 +26,10 @@ int main(int, char**) {
   run_reply_tests();
   run_portal_led_tests();
   run_client_tests();
+  run_sensor_tests();
+  run_scenario_tests();
+  run_wifi_tests();
+  run_portal_http_tests();
+  run_ota_tests();
   return UNITY_END();
 }

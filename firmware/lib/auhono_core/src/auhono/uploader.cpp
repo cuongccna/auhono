@@ -63,7 +63,8 @@ FlushResult ReadingsUploader::flush() {
   }
 
   const uint32_t startMs = platform_.millis();
-  size_t limit = kMaxBatch;  // giảm khi server từ chối cả gói
+  size_t limit = kMaxBatch;  // giảm (chia đôi) khi server từ chối cả gói; giữ nguyên khi gói nhỏ được nhận
+  size_t rejections = 0;
   for (size_t iter = 0; !buffer_.empty() && iter < kMaxBatchesPerFlush; iter++) {
     if (iter > 0 && static_cast<uint32_t>(platform_.millis() - startMs) >= kFlushBudgetMs) break;
 
@@ -79,7 +80,8 @@ FlushResult ReadingsUploader::flush() {
       res.sentReadings += n;
       if (r.accepted < n) res.serverDroppedReadings += n - r.accepted;
       buffer_.popFront(n);
-      limit = kMaxBatch;
+      // Không tăng lại `limit` ngay: nếu vừa chia đôi vì gói bị từ chối thì số đo "độc" vẫn nằm phía sau,
+      // giữ cỡ gói nhỏ để cô lập nó nhanh nhất (mỗi lần flush bắt đầu lại với cỡ tối đa).
       if (r.hasConfig && !(r.config == thresholds_)) {
         thresholds_ = r.config;
         res.thresholdsChanged = true;
@@ -89,6 +91,7 @@ FlushResult ReadingsUploader::flush() {
 
     if (r.kind == ReplyKind::BadRequest || r.kind == ReplyKind::TooLarge) {
       // Server từ chối gói. Đừng xóa cả gói (có thể là lỗi server/giao thức tạm thời, xóa là mất sạch 24 giờ dữ liệu).
+      ++rejections;
       if (n > 1) {  // chia đôi để cô lập số đo "độc"
         limit = n / 2;
         continue;
@@ -113,6 +116,13 @@ FlushResult ReadingsUploader::flush() {
     res.certError = client_.lastResponse().certError;
     res.remaining = buffer_.size();
     return res;
+  }
+  // Chạm giới hạn mà server vẫn đang từ chối và chưa gửi được gì: KHÔNG được báo "ok" (main sẽ gọi lại sau 2 s ->
+  // vòng lặp dồn dập). Coi là thất bại dai dẳng để thử lại chậm.
+  if (rejections > 0 && res.sentReadings == 0) {
+    res.ok = false;
+    res.failClass = FailClass::Persistent;
+    res.certError = false;
   }
   res.remaining = buffer_.size();  // > 0 nếu chạm giới hạn gói/thời gian mỗi lần; không phải lỗi
   return res;

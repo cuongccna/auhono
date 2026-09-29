@@ -1,4 +1,4 @@
-// Backoff khi gửi lỗi, cộng ngẫu nhiên ±20% để nhiều máy không dồn cùng lúc sau mất điện (docs/PROTOCOL.md).
+// Backoff khi gửi lỗi, cộng ngẫu nhiên ±20% (độ mịn 0,1%) để nhiều máy không dồn cùng lúc sau mất điện (docs/PROTOCOL.md).
 //   Nhanh (mạng/5xx):   30 s -> 1 -> 2 -> 5 phút (không vượt 5 phút)
 //   Chậm (401/429/403...): 5 -> 10 -> 20 -> 30 -> 60 phút  (thiết bị bị thu hồi / sai khóa / bị giới hạn tốc độ:
 //                          không được gõ cửa server dồn dập; 1 lần/giờ là đủ để tự hồi phục khi sự cố hết)

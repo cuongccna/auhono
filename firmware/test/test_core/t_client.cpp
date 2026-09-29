@@ -85,14 +85,14 @@ static void test_signed_bytes_equal_sent_bytes() {
 
 static void test_flush_batches_oldest_first_and_max_20() {
   Rig r;
-  r.fill(45);
+  r.fill(45, Rig::kMonoNow - 3000);
   const FlushResult f = r.up->flush();
   TEST_ASSERT_TRUE(f.ok);
   TEST_ASSERT_EQUAL_UINT(3, r.http.log.size());  // 20 + 20 + 5
   TEST_ASSERT_EQUAL_UINT(45, f.sentReadings);
   TEST_ASSERT_TRUE(r.buf.empty());
-  TEST_ASSERT_TRUE(r.http.log[0].body.find("\"t\":1799999000,") != std::string::npos);  // gói đầu chứa số đo cũ nhất
-  TEST_ASSERT_TRUE(r.http.log[1].body.find("\"t\":1800000200,") != std::string::npos);  // 1799999000 + 20*60
+  TEST_ASSERT_TRUE(r.http.log[0].body.find("\"t\":1799997000,") != std::string::npos);  // gói đầu chứa số đo cũ nhất
+  TEST_ASSERT_TRUE(r.http.log[1].body.find("\"t\":1799998200,") != std::string::npos);  // 1799997000 + 20*60
   // seq tăng nghiêm ngặt giữa các gói
   TEST_ASSERT_EQUAL_STRING("1", r.http.log[0].req.headers.seq.c_str());
   TEST_ASSERT_EQUAL_STRING("2", r.http.log[1].req.headers.seq.c_str());
@@ -101,7 +101,7 @@ static void test_flush_batches_oldest_first_and_max_20() {
 
 static void test_failed_upload_keeps_readings_for_retry() {
   Rig r;
-  r.fill(30);
+  r.fill(30, Rig::kMonoNow - 3000);
   r.http.script.push_back({-1, ""});  // lỗi mạng
   FlushResult f = r.up->flush();
   TEST_ASSERT_FALSE(f.ok);
@@ -114,7 +114,7 @@ static void test_failed_upload_keeps_readings_for_retry() {
 
 static void test_partial_failure_drops_only_sent_batches() {
   Rig r;
-  r.fill(45);
+  r.fill(45, Rig::kMonoNow - 3000);
   r.http.script.push_back({200, okBody(20)});
   r.http.script.push_back({503, ""});
   FlushResult f = r.up->flush();
@@ -123,13 +123,13 @@ static void test_partial_failure_drops_only_sent_batches() {
   TEST_ASSERT_EQUAL_UINT(25, r.buf.size());
   Reading first;
   r.buf.peek(&first, 1);
-  TEST_ASSERT_EQUAL_UINT32(1799999000u + 20 * 60, first.t);
+  TEST_ASSERT_EQUAL_UINT32(Rig::kMonoNow - 3000 + 20 * 60, first.t);
 }
 
 static void test_clock_skew_resets_clock_and_resigns_with_new_seq() {
   Rig r;
   r.plat.unix_ = 1799990000;  // lệch ~2,7 giờ
-  r.fill(1, 1799999000);
+  r.fill(1);
   r.http.script.push_back({401, "{\"error\":\"clock_skew\",\"server_time\":1800000000}"});
   const FlushResult f = r.up->flush();
   TEST_ASSERT_TRUE(f.ok);
@@ -140,6 +140,10 @@ static void test_clock_skew_resets_clock_and_resigns_with_new_seq() {
   TEST_ASSERT_EQUAL_STRING("1", r.http.log[0].req.headers.seq.c_str());
   TEST_ASSERT_EQUAL_STRING("2", r.http.log[1].req.headers.seq.c_str());  // "tăng seq, gửi lại"
   TEST_ASSERT_EQUAL_STRING(expectedSig(r, r.http.log[1]).c_str(), r.http.log[1].req.headers.signature.c_str());
+  // QUAN TRỌNG: body phải được DỰNG LẠI theo đồng hồ đã chỉnh. Nếu gửi lại body cũ thì số đo mang giờ sai ~2,7 giờ
+  // và server (INSERT OR IGNORE) sẽ giữ luôn dữ liệu sai.
+  TEST_ASSERT_TRUE(r.http.log[0].body.find("\"t\":1799989000") != std::string::npos);
+  TEST_ASSERT_TRUE(r.http.log[1].body.find("\"t\":1799999000") != std::string::npos);
   TEST_ASSERT_TRUE(r.buf.empty());
 }
 
@@ -175,21 +179,60 @@ static void test_unauthorized_is_not_retried_immediately() {
   TEST_ASSERT_EQUAL_UINT(2, r.buf.size());
 }
 
-static void test_bad_request_drops_batch_not_resend() {
+static void test_bad_request_bisects_and_keeps_data() {
   Rig r;
-  r.fill(25);
-  r.http.script.push_back({400, "{\"error\":\"bad_request\"}"});
+  r.fill(25, Rig::kMonoNow - 3000);
+  r.http.script.push_back({400, "{\"error\":\"bad_request\"}"});  // một lần (vd. lỗi tạm thời phía server)
   const FlushResult f = r.up->flush();
   TEST_ASSERT_TRUE(f.ok);
-  TEST_ASSERT_EQUAL_UINT(20, f.discardedReadings);
+  TEST_ASSERT_EQUAL_UINT(0, f.discardedReadings);  // KHÔNG được xóa cả gói chỉ vì một lần 400
+  TEST_ASSERT_EQUAL_UINT(25, f.sentReadings);      // rốt cuộc mọi số đo đều tới server
+  TEST_ASSERT_TRUE(r.buf.empty());
+  TEST_ASSERT_TRUE(r.http.log[0].body != r.http.log[1].body);  // không gửi lại nguyên xi: gói nhỏ hơn
+}
+
+static void test_poison_reading_is_isolated_and_dropped() {
+  Rig r;
+  r.fill(6, Rig::kMonoNow - 1000);
+  // Số đo thứ 3 (t = now-1000+2*60) bị server từ chối; mọi gói chứa nó đều 400.
+  struct PoisonHttp : IHttp {
+    FakeHttp* inner;
+    std::string poison;
+    HttpResponse perform(const HttpRequest& req) override {
+      const std::string b(reinterpret_cast<const char*>(req.body), req.bodyLen);
+      inner->log.push_back({req, b});
+      if (b.find(poison) != std::string::npos) return {400, "{\"error\":\"bad_request\"}", false};
+      return {200, okBody(1), false};
+    }
+  } ph;
+  FakeHttp dummy;
+  ph.inner = &dummy;
+  ph.poison = "\"t\":1799999120,";
+  DeviceClient client(*r.signer, *r.seq, r.plat, ph);
+  ReadingsUploader up(client, r.buf, r.th, r.plat, "1.0.0");
+  const FlushResult f = up.flush();
+  TEST_ASSERT_TRUE(f.ok);
+  TEST_ASSERT_EQUAL_UINT(1, f.discardedReadings);  // chỉ đúng số đo độc bị bỏ
   TEST_ASSERT_EQUAL_UINT(5, f.sentReadings);
-  TEST_ASSERT_EQUAL_UINT(2, r.http.log.size());
-  TEST_ASSERT_TRUE(r.http.log[0].body != r.http.log[1].body);  // không gửi lại nguyên xi
+  TEST_ASSERT_TRUE(r.buf.empty());
+}
+
+static void test_persistent_400_never_wipes_the_buffer() {
+  Rig r;
+  r.fill(100, Rig::kMonoNow - 6500);
+  for (int i = 0; i < 50; i++) r.http.script.push_back({400, "{\"error\":\"bad_request\"}"});
+  const FlushResult f = r.up->flush();
+  // Server từ chối MỌI thứ (lệch giao thức/deploy hỏng): tối đa vài số đo bị bỏ mỗi lần flush, còn lại được GIỮ.
+  TEST_ASSERT_FALSE(f.ok);
+  TEST_ASSERT_TRUE(f.discardedReadings <= ReadingsUploader::kMaxPoisonDropsPerFlush);
+  TEST_ASSERT_TRUE(r.buf.size() >= 100 - ReadingsUploader::kMaxPoisonDropsPerFlush);
+  TEST_ASSERT_EQUAL(FailClass::Persistent, f.failClass);  // => thử lại chậm, không dồn dập
+  TEST_ASSERT_TRUE(r.http.log.size() <= ReadingsUploader::kMaxBatchesPerFlush);  // và mỗi lần flush chỉ vài request
 }
 
 static void test_too_large_halves_batch() {
   Rig r;
-  r.fill(20);
+  r.fill(20, Rig::kMonoNow - 1500);
   r.http.script.push_back({413, "{\"error\":\"too_large\"}"});
   const FlushResult f = r.up->flush();
   TEST_ASSERT_TRUE(f.ok);
@@ -215,9 +258,11 @@ static void test_thresholds_updated_from_config() {
 
 static void test_flush_drops_readings_older_than_24h() {
   Rig r;
-  r.buf.push(Reading{1800000000u - 25 * 3600, -1900});  // quá 24 giờ: server sẽ bỏ
-  r.buf.push(Reading{1800000000u - 3600, -1900});
-  r.up->flush();
+  r.plat.mono = 200000;  // đã chạy 55 giờ
+  r.buf.push(Reading{200000u - 25 * 3600, -1900});  // quá 24 giờ: server sẽ bỏ
+  r.buf.push(Reading{200000u - 3600, -1900});
+  const FlushResult f = r.up->flush();
+  TEST_ASSERT_EQUAL_UINT(1, f.staleDropped);
   TEST_ASSERT_EQUAL_UINT(1, r.http.log.size());
   TEST_ASSERT_TRUE(r.http.log[0].body.find("\"t\":1799996400") != std::string::npos);
   TEST_ASSERT_TRUE(r.http.log[0].body.find(std::to_string(1800000000u - 25 * 3600)) == std::string::npos);
@@ -233,7 +278,7 @@ static void test_empty_buffer_sends_nothing() {
 
 static void test_watchdog_fed_during_flush() {
   Rig r;
-  r.fill(60);
+  r.fill(60, Rig::kMonoNow - 4000);
   r.up->flush();
   TEST_ASSERT_TRUE(r.plat.wdtFeeds >= 3);
 }
@@ -242,8 +287,8 @@ static void test_ok_reply_sets_untrusted_clock() {
   Rig r;
   r.plat.trusted = false;
   r.plat.unix_ = 5;  // 1970
-  r.fill(1);
-  r.up->flush();
+  const char body[] = "{}";
+  r.client->call("POST", "/v1/readings", reinterpret_cast<const uint8_t*>(body), 2);
   TEST_ASSERT_EQUAL_UINT32(1800000000u, r.plat.unix_);
   TEST_ASSERT_TRUE(r.plat.trusted);
 }
@@ -285,7 +330,9 @@ void run_client_tests() {
   RUN_TEST(test_replay_409_jumps_seq_past_last_seq);
   RUN_TEST(test_replay_and_skew_retries_are_bounded);
   RUN_TEST(test_unauthorized_is_not_retried_immediately);
-  RUN_TEST(test_bad_request_drops_batch_not_resend);
+  RUN_TEST(test_bad_request_bisects_and_keeps_data);
+  RUN_TEST(test_poison_reading_is_isolated_and_dropped);
+  RUN_TEST(test_persistent_400_never_wipes_the_buffer);
   RUN_TEST(test_too_large_halves_batch);
   RUN_TEST(test_thresholds_updated_from_config);
   RUN_TEST(test_flush_drops_readings_older_than_24h);

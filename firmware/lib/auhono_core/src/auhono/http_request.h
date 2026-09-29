@@ -67,6 +67,7 @@ class HttpRequestParser {
   HttpError error_ = HttpError::None;
   Phase phase_ = Phase::RequestLine;
   std::string line_;
+  bool pendingCr_ = false;   // vừa nhận '\r': ký tự kế tiếp bắt buộc là '\n'
   size_t headerBytes_ = 0;
   size_t headerCount_ = 0;
 

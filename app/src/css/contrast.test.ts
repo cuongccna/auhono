@@ -33,6 +33,7 @@ const PAIRS: [string, string, string][] = [
   ['auh-alarm', 'auh-alarm-bg', 'huy hiệu / banner báo động'],
   ['auh-alarm', 'auh-card', 'lỗi dưới ô nhập'],
   ['auh-off', 'auh-off-bg', 'huy hiệu Mất kết nối / banner cảnh báo'],
+  ['auh-sensor', 'auh-sensor-bg', 'huy hiệu / banner lỗi cảm biến'],
   ['auh-info', 'auh-info-bg', 'banner thông tin / nút phụ'],
   ['auh-on-primary', 'auh-primary', 'chữ trên nút chính'],
   ['auh-text', 'auh-input-bg', 'chữ trong ô nhập'],

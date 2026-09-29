@@ -563,3 +563,40 @@ describe('Telegram (API client)', () => {
     }
   });
 });
+
+describe('getSetup (Wi-Fi cài đặt)', () => {
+  const OK = { ap_ssid: 'Auhono-0001', ap_password: 'XP1CZHP3Z0', wifi_qr: 'WIFI:T:WPA;S:Auhono-0001;P:XP1CZHP3Z0;H:false;;' };
+
+  it('GET /v1/devices/:id/setup, cache no-store, trả SSID + mật khẩu', async () => {
+    const f = vi.fn<typeof fetch>(async () => jsonRes(OK));
+    expect(await client(f).getSetup('AUH-000001')).toEqual(OK);
+    const [url, init] = f.mock.calls[0]!;
+    expect(url).toBe(`${BASE}/v1/devices/AUH-000001/setup`);
+    expect(init!.method).toBe('GET');
+    expect(init!.cache).toBe('no-store');
+  });
+  it('404 (không phải chủ / chưa kích hoạt) => not_found', async () => {
+    const f = vi.fn<typeof fetch>(async () => jsonRes({ error: 'not_found' }, 404));
+    expect(await codeOf(client(f).getSetup('AUH-000001'))).toBe('not_found');
+  });
+  it('phản hồi sai dạng => bad_response; mật khẩu không lọt vào thông điệp lỗi', async () => {
+    const f = vi.fn<typeof fetch>(async () => jsonRes({ ap_ssid: 'Auhono-0001', ap_password: 'short pw' }));
+    try {
+      await client(f).getSetup('AUH-000001');
+      throw new Error('phải ném lỗi');
+    } catch (e) {
+      expect((e as AppError).code).toBe('bad_response');
+      expect(JSON.stringify(e) + String((e as Error).message)).not.toContain('short pw');
+    }
+  });
+  it('mật khẩu không bị ghi log (kể cả khi lỗi)', async () => {
+    const spies = (['log', 'info', 'warn', 'error', 'debug'] as const).map((m) => vi.spyOn(console, m).mockImplementation(() => undefined));
+    try {
+      await client(vi.fn<typeof fetch>(async () => jsonRes(OK))).getSetup('AUH-000001');
+      await client(vi.fn<typeof fetch>(async () => jsonRes({ error: 'not_found' }, 404))).getSetup('AUH-000001').catch(() => undefined);
+      for (const s of spies) expect(s).not.toHaveBeenCalled();
+    } finally {
+      spies.forEach((s) => s.mockRestore());
+    }
+  });
+});

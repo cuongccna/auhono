@@ -6,6 +6,7 @@ import DevicePage from '../pages/device.tsx';
 import HomePage from '../pages/home.tsx';
 import RecipientsPage from '../pages/recipients.tsx';
 import RenamePage from '../pages/rename.tsx';
+import SetupPage from '../pages/setup.tsx';
 import ThresholdsPage from '../pages/thresholds.tsx';
 import { isZaloDarkTheme } from '../sdk.ts';
 import { ErrorBoundary } from './error-boundary.tsx';
@@ -56,6 +57,7 @@ export default function Root() {
               <Route path="/device/:id/thresholds" element={<ThresholdsPage />} />
               <Route path="/device/:id/recipients" element={<RecipientsPage />} />
               <Route path="/device/:id/rename" element={<RenamePage />} />
+              <Route path="/device/:id/setup" element={<SetupPage />} />
             </AnimationRoutes>
           </ErrorBoundary>
           <Nav />

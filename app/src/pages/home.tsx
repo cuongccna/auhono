@@ -10,7 +10,7 @@ import { POLL_MS, useAsync, useNow } from '../hooks.ts';
 import { pausedBanner } from '../lib/alert-actions.ts';
 import { formatAgo, formatTemp, formatVnTime } from '../lib/format.ts';
 import { deviceNotices, NOTICE_TEXT } from '../lib/notices.ts';
-import { deviceStatus, STATUS_LABEL } from '../lib/status.ts';
+import { deviceStatus, sortBySeverity, STATUS_LABEL } from '../lib/status.ts';
 import { kindLabel } from '../lib/thresholds.ts';
 
 export default function HomePage() {
@@ -50,8 +50,11 @@ export default function HomePage() {
         </div>
       )}
 
-      {devices?.map((d) => {
-        const status = deviceStatus({ phase: d.phase, lastSeen: d.last_seen, nowSeconds: asOf, pausedUntil: d.paused_until });
+      {/* Sự cố (báo động, lỗi cảm biến) lên đầu; cùng mức giữ thứ tự của server */}
+      {sortBySeverity(
+        (devices ?? []).map((d) => ({ d, status: deviceStatus({ phase: d.phase, lastSeen: d.last_seen, nowSeconds: asOf, pausedUntil: d.paused_until }) })),
+        (x) => x.status,
+      ).map(({ d, status }) => {
         const notices = deviceNotices(d, status);
         return (
           <button
@@ -69,9 +72,10 @@ export default function HomePage() {
             <div className="auh-row-between auh-wrap">
               <span className="auh-temp-big">{d.latest ? formatTemp(d.latest.temp_c) : '--'}</span>
               <span className="auh-muted" style={{ textAlign: 'right' }}>
-                {d.latest ? `${status === 'offline' ? 'Số đo cuối' : 'Cập nhật'} ${formatAgo(now, d.latest.ts)}` : 'Chưa có số đo'}
+                {d.latest ? `${status === 'offline' || status === 'sensor' ? 'Số đo cuối' : 'Cập nhật'} ${formatAgo(now, d.latest.ts)}` : 'Chưa có số đo'}
               </span>
             </div>
+            {status === 'sensor' && <div className="auh-card-note auh-card-note-sensor">Không đọc được nhiệt độ — kiểm tra dây đầu dò.</div>}
             {status === 'paused' && d.paused_until != null && <div className="auh-card-note auh-card-note-info">{pausedBanner(d.paused_until)}</div>}
             {notices.map((n) => (
               <div key={n} className="auh-card-note">

@@ -5,7 +5,7 @@ import { Modal, useNavigate, useParams, useSnackbar } from 'zmp-ui';
 import { api } from '../api.ts';
 import { removeDevice } from '../actions.ts';
 import { ErrorBox } from '../components/error-box.tsx';
-import { AlertHelp, NoticeBanner, SetupHelp } from '../components/help.tsx';
+import { AlertHelp, NoticeBanner, SetupHelp, TechInfo } from '../components/help.tsx';
 import { Screen } from '../components/screen.tsx';
 import { StatusBadge } from '../components/status-badge.tsx';
 import { TempChart } from '../components/temp-chart.tsx';
@@ -91,7 +91,10 @@ export default function DevicePage() {
   const acked = device ? isAcked({ acked_until: ackUntil }, asOf) && device.phase !== 'ok' && !paused : false;
   const enc = encodeURIComponent(id);
   const notices = device && status ? deviceNotices(device, status) : [];
-  const since = device && status === 'alarm' && data?.readings ? outOfRangeSince(data.readings.points, device.min_c, device.max_c) : null;
+  // "Từ khi nào": ưu tiên alarm_since của server; server cũ thì suy từ biểu đồ.
+  const inferred = device && status === 'alarm' && data?.readings ? outOfRangeSince(data.readings.points, device.min_c, device.max_c) : null;
+  const since = device?.alarm_since ? { since: device.alarm_since, entireWindow: false } : inferred;
+  const lastReadingAt = device ? (device.last_reading_at ?? device.latest?.ts ?? null) : null;
 
   /** Chạy một thao tác ghi (ack/tạm dừng/bật lại) với chống bấm đúp; lỗi hiện trong hộp lỗi, xong thì tải lại. */
   async function act(run: () => Promise<void>) {
@@ -166,7 +169,7 @@ export default function DevicePage() {
             </div>
             <div className="auh-muted" style={{ margin: 0 }}>
               {device.latest
-                ? `${status === 'offline' ? 'Số đo cuối' : 'Cập nhật'} ${formatAgo(now, device.latest.ts)} (${formatVnDateTime(device.latest.ts)})`
+                ? `${status === 'offline' || status === 'sensor' ? 'Số đo cuối' : 'Cập nhật'} ${formatAgo(now, device.latest.ts)} (${formatVnDateTime(device.latest.ts)})`
                 : 'Thiết bị chưa gửi số đo nào.'}
             </div>
 
@@ -203,9 +206,19 @@ export default function DevicePage() {
               </div>
             )}
 
+            {status === 'sensor' && (
+              <div className="auh-banner auh-banner-sensor" role="alert" style={{ marginTop: 12, marginBottom: 0 }}>
+                <strong>Lỗi cảm biến — thiết bị vẫn kết nối nhưng không đọc được nhiệt độ.</strong>{' '}
+                {lastReadingAt !== null ? <>Số đo hợp lệ cuối lúc {formatVnDateTime(lastReadingAt)} ({formatAgo(now, lastReadingAt)}). </> : null}
+                Thường do <strong>dây đầu dò bị đứt, rút ra hoặc kẹt ở gioăng cửa tủ</strong>. Bạn nên đi kiểm tra ngay: xem dây đầu dò và đầu cắm của nó,
+                đừng chỉ chờ. Nhiệt độ thật trong tủ lúc này không xem được.
+              </div>
+            )}
+
             {status === 'unknown' && (
-              <div className="auh-banner auh-banner-info" style={{ marginTop: 12, marginBottom: 0 }}>
-                Chưa rõ tình trạng của thiết bị này. Bạn thử làm mới, hoặc cập nhật ứng dụng Zalo.
+              <div className="auh-banner auh-banner-info" role="status" style={{ marginTop: 12, marginBottom: 0 }}>
+                <strong>Cần kiểm tra.</strong> Thiết bị đang ở một trạng thái mà ứng dụng chưa hiểu (có thể ứng dụng cũ hơn hệ thống). Bạn nên kiểm tra tủ,
+                thử làm mới và cập nhật ứng dụng Zalo.
               </div>
             )}
 
@@ -265,6 +278,10 @@ export default function DevicePage() {
 
           <section className="auh-card">
             <AlertHelp breachMinutes={device.breach_minutes} />
+            <TechInfo device={device} />
+            <button type="button" className="auh-btn auh-btn-secondary" style={{ marginTop: 12 }} onClick={() => navigate(`/device/${enc}/setup`)}>
+              Thông tin Wi-Fi cài đặt thiết bị
+            </button>
           </section>
 
           {supportsPause(device) && !paused && (

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { AppError } from './errors.ts';
-import { MAX_POINTS, parseOkUntil, parseRecipientsResponse, parseTelegramLink, parseDevice, parseDeviceList, parseOk, parseReadings, parseRecipient, parseRecipientList, parseServerTime } from './schemas.ts';
+import { MAX_POINTS, parseDiag, parseSetup, parseOkUntil, parseRecipientsResponse, parseTelegramLink, parseDevice, parseDeviceList, parseOk, parseReadings, parseRecipient, parseRecipientList, parseServerTime } from './schemas.ts';
 
 const device = {
   id: 'AUH-000001',
@@ -205,5 +205,55 @@ describe('Telegram: người nhận và liên kết', () => {
       bad(() => parseTelegramLink({ url, expires_at: 1 }));
     }
     bad(() => parseTelegramLink(null));
+  });
+});
+
+describe('lỗi cảm biến: last_reading_at / diag / alarm_since', () => {
+  it('đọc đủ các trường mới', () => {
+    const d = parseDevice({ ...device, phase: 'sensor_fault', last_reading_at: 1_799_990_000, diag_at: 1_800_000_000, alarm_since: null,
+      diag: { sensor: 'fault', fault_s: 1200, rst: 'brownout', rssi: -71, heap: 84000, up: 86400 } });
+    expect(d.phase).toBe('sensor_fault');
+    expect(d).toMatchObject({ last_reading_at: 1_799_990_000, diag_at: 1_800_000_000, alarm_since: null });
+    expect(d.diag).toEqual({ sensor: 'fault', fault_s: 1200, rst: 'brownout', rssi: -71, heap: 84000, up: 86400 });
+  });
+  it('server cũ: các trường vắng mặt', () => {
+    const d = parseDevice(device);
+    for (const k of ['last_reading_at', 'diag', 'diag_at', 'alarm_since']) expect(k in d).toBe(false);
+  });
+  it('phase lạ của server mới vẫn đọc được (giữ nguyên chuỗi)', () => {
+    expect(parseDevice({ ...device, phase: 'quantum_flux' }).phase).toBe('quantum_flux');
+  });
+  it('parseDiag: bỏ trường sai kiểu/ngoài khoảng, rỗng => null, không phải object => undefined', () => {
+    expect(parseDiag({ rssi: -60, up: 5, junk: 1 })).toEqual({ rssi: -60, up: 5 });
+    expect(parseDiag({ rssi: 10, rst: 'a b', sensor: 'maybe', fault_s: -1, up: 1.5, heap: '1' })).toBeNull();
+    expect(parseDiag({})).toBeNull();
+    expect(parseDiag(null)).toBeNull();
+    for (const v of ['x', 5, [], undefined]) expect(parseDiag(v)).toBeUndefined();
+  });
+  it('diag hỏng không làm hỏng thiết bị', () => {
+    const d = parseDevice({ ...device, diag: 'garbage', last_reading_at: 'x' });
+    expect(d.id).toBe('AUH-000001');
+    expect('diag' in d).toBe(false);
+    expect('last_reading_at' in d).toBe(false);
+  });
+});
+
+describe('parseSetup (Wi-Fi cài đặt)', () => {
+  it('đúng dạng', () => {
+    expect(parseSetup({ ap_ssid: 'Auhono-0001', ap_password: 'XP1CZHP3Z0', wifi_qr: 'WIFI:T:WPA;S:Auhono-0001;P:XP1CZHP3Z0;H:false;;' })).toEqual({
+      ap_ssid: 'Auhono-0001', ap_password: 'XP1CZHP3Z0', wifi_qr: 'WIFI:T:WPA;S:Auhono-0001;P:XP1CZHP3Z0;H:false;;',
+    });
+  });
+  it('wifi_qr tùy chọn; giá trị lạ bị bỏ', () => {
+    expect('wifi_qr' in parseSetup({ ap_ssid: 'Auhono-0001', ap_password: 'XP1CZHP3Z0' })).toBe(false);
+    expect('wifi_qr' in parseSetup({ ap_ssid: 'Auhono-0001', ap_password: 'XP1CZHP3Z0', wifi_qr: 'http://evil' })).toBe(false);
+  });
+  it('sai dạng => bad_response', () => {
+    bad(() => parseSetup(null));
+    bad(() => parseSetup({ ap_ssid: 'A', ap_password: 'short' }));
+    bad(() => parseSetup({ ap_ssid: '', ap_password: 'XP1CZHP3Z0' }));
+    bad(() => parseSetup({ ap_ssid: 'x'.repeat(33), ap_password: 'XP1CZHP3Z0' }));
+    bad(() => parseSetup({ ap_ssid: 'Auhono-0001', ap_password: 'has space 12' }));
+    bad(() => parseSetup({ ap_ssid: 5, ap_password: 'XP1CZHP3Z0' }));
   });
 });

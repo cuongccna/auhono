@@ -9,6 +9,20 @@ import { isTelegramUrl, type RecipientMode } from './telegram.ts';
 /** Loại tủ; 'other' = server có loại mới mà app chưa biết (vẫn hiển thị được, không bị lỗi cả danh sách). */
 export type DeviceKind = Kind | 'other';
 
+/** Chẩn đoán do thiết bị gửi kèm nhịp tim (mọi trường tùy chọn; trường sai kiểu bị bỏ). */
+export interface Diag {
+  sensor?: 'ok' | 'fault';
+  /** Bao nhiêu giây kể từ số đo hợp lệ cuối. */
+  fault_s?: number;
+  /** Lý do khởi động lại gần nhất (poweron, brownout, wdt...). */
+  rst?: string;
+  /** Cường độ Wi-Fi (dBm, âm). */
+  rssi?: number;
+  heap?: number;
+  /** Thời gian chạy từ lần khởi động (giây). */
+  up?: number;
+}
+
 export interface Device {
   id: string;
   name: string;
@@ -34,6 +48,13 @@ export interface Device {
   acked_until?: number | null;
   /** Lúc kích hoạt (Unix giây). Vắng mặt = server cũ. */
   claimed_at?: number | null;
+  /** Thời điểm số đo hợp lệ cuối (Unix giây). Khác last_seen khi đầu dò hỏng nhưng thiết bị còn sống. Vắng mặt = server cũ. */
+  last_reading_at?: number | null;
+  /** Chẩn đoán gần nhất; null = chưa có. Vắng mặt = server cũ. */
+  diag?: Diag | null;
+  diag_at?: number | null;
+  /** Báo động nhiệt độ bắt đầu từ lúc nào (Unix giây); null = không có. Vắng mặt = server cũ. */
+  alarm_since?: number | null;
 }
 
 export interface Readings {
@@ -100,6 +121,25 @@ function numOrNull(o: Obj, k: string): number | null {
 /** Mốc thời gian: số dương hữu hạn, hoặc null; khác thì undefined (trường mới sai kiểu không được làm hỏng cả thiết bị). */
 const optTs = (v: unknown): number | null | undefined => (v === null ? null : typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : undefined);
 
+/** Chỉ giữ các trường chẩn đoán đúng kiểu và trong khoảng hợp lý; rỗng => null. */
+export function parseDiag(v: unknown): Diag | null | undefined {
+  if (v === null) return null;
+  if (!isObj(v)) return undefined;
+  const d: Diag = {};
+  if (v.sensor === 'ok' || v.sensor === 'fault') d.sensor = v.sensor;
+  const int = (x: unknown, lo: number, hi: number) => (isNum(x) && Number.isInteger(x) && x >= lo && x <= hi ? x : undefined);
+  const faultS = int(v.fault_s, 0, 2147483647);
+  if (faultS !== undefined) d.fault_s = faultS;
+  if (typeof v.rst === 'string' && /^[A-Za-z0-9_]{1,16}$/.test(v.rst)) d.rst = v.rst;
+  const rssi = int(v.rssi, -120, 0);
+  if (rssi !== undefined) d.rssi = rssi;
+  const heap = int(v.heap, 0, 1_000_000_000);
+  if (heap !== undefined) d.heap = heap;
+  const up = int(v.up, 0, 2147483647);
+  if (up !== undefined) d.up = up;
+  return Object.keys(d).length > 0 ? d : null;
+}
+
 /** Số nguyên không âm hợp lệ, nếu không thì undefined (trường mới: không được làm hỏng cả thiết bị). */
 const optCount = (v: unknown): number | undefined => (typeof v === 'number' && Number.isInteger(v) && v >= 0 ? v : undefined);
 
@@ -128,6 +168,10 @@ export function parseDevice(v: unknown): Device {
     ...(optTs(o.paused_until) !== undefined ? { paused_until: optTs(o.paused_until)! } : {}),
     ...(optTs(o.acked_until) !== undefined ? { acked_until: optTs(o.acked_until)! } : {}),
     ...(optTs(o.claimed_at) !== undefined ? { claimed_at: optTs(o.claimed_at)! } : {}),
+    ...(optTs(o.last_reading_at) !== undefined ? { last_reading_at: optTs(o.last_reading_at)! } : {}),
+    ...(optTs(o.diag_at) !== undefined ? { diag_at: optTs(o.diag_at)! } : {}),
+    ...(optTs(o.alarm_since) !== undefined ? { alarm_since: optTs(o.alarm_since)! } : {}),
+    ...(parseDiag(o.diag) !== undefined ? { diag: parseDiag(o.diag)! } : {}),
   };
 }
 
@@ -216,4 +260,22 @@ export function parseOkUntil(v: unknown, field: 'acked_until' | 'paused_until'):
 /** Phản hồi chỉ cần biết là `{ ok: true }`. */
 export function parseOk(v: unknown): void {
   if (obj(v).ok !== true) bad();
+}
+
+/** Thông tin Wi-Fi cấu hình của thiết bị. Nhạy cảm: không lưu, không log. */
+export interface SetupInfo {
+  ap_ssid: string;
+  ap_password: string;
+  /** Chuỗi "WIFI:T:WPA;..." (chỉ hiện ở mục Nâng cao, không vẽ thành mã QR). */
+  wifi_qr?: string;
+}
+
+export function parseSetup(v: unknown): SetupInfo {
+  const o = obj(v);
+  const ssid = str(o, 'ap_ssid');
+  const password = str(o, 'ap_password');
+  // SSID tối đa 32 ký tự in được; mật khẩu WPA2 8–63 ký tự ASCII in được, không khoảng trắng.
+  if (!/^[\x20-\x7E]{1,32}$/.test(ssid) || !/^[\x21-\x7E]{8,63}$/.test(password)) return bad();
+  const qr = o.wifi_qr;
+  return { ap_ssid: ssid, ap_password: password, ...(typeof qr === 'string' && qr.length <= 200 && qr.startsWith('WIFI:') ? { wifi_qr: qr } : {}) };
 }

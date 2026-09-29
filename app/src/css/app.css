@@ -17,6 +17,8 @@
   --auh-info: #0b4fb3;
   --auh-info-bg: #e6f0fe;
   --auh-neutral-bg: #e9ebed;
+  --auh-sensor: #6a1b9a;
+  --auh-sensor-bg: #f3e5f5;
   --auh-tap: 48px;
   --auh-top: calc(var(--zaui-safe-area-inset-top, 0px) + 56px);
 }
@@ -40,6 +42,8 @@
   --auh-info: #9cc4ff;
   --auh-info-bg: #14284a;
   --auh-neutral-bg: #2a2f37;
+  --auh-sensor: #e1b3f5;
+  --auh-sensor-bg: #3a1a47;
 }
 
 html {
@@ -212,6 +216,7 @@ body {
 .auh-badge-ok { background: var(--auh-ok-bg); color: var(--auh-ok); }
 .auh-badge-alarm { background: var(--auh-alarm-bg); color: var(--auh-alarm); }
 .auh-badge-offline { background: var(--auh-off-bg); color: var(--auh-off); }
+.auh-badge-sensor { background: var(--auh-sensor-bg); color: var(--auh-sensor); }
 .auh-badge-no_data,
 .auh-badge-paused,
 .auh-badge-unknown { background: var(--auh-neutral-bg); color: var(--auh-muted); }
@@ -340,6 +345,10 @@ body {
   font-size: 14px;
   line-height: 19px;
 }
+.auh-card-note-sensor {
+  background: var(--auh-sensor-bg);
+  color: var(--auh-sensor);
+}
 .auh-card-note-info {
   background: var(--auh-info-bg);
   color: var(--auh-info);
@@ -419,3 +428,33 @@ main, .auh-card { overflow-wrap: break-word; }
 @media (max-width: 359px) {
   .auh-modes { grid-template-columns: 1fr; }
 }
+
+.auh-banner-sensor { background: var(--auh-sensor-bg); color: var(--auh-sensor); }
+
+/* Màn hình Wi-Fi cài đặt: ký tự lớn, tách rời để đọc/chép tay không nhầm */
+.auh-cred {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 8px 0;
+  font-family: ui-monospace, Menlo, Consolas, monospace;
+}
+.auh-cred-char {
+  min-width: 28px;
+  padding: 6px 4px;
+  border: 1.5px solid var(--auh-border);
+  border-radius: 8px;
+  background: var(--auh-input-bg);
+  color: var(--auh-text);
+  font-size: 26px;
+  font-weight: 700;
+  line-height: 32px;
+  text-align: center;
+}
+.auh-secret-note { font-weight: 600; }
+
+.auh-tech { margin: 0; }
+.auh-tech-row { display: flex; flex-wrap: wrap; gap: 4px 12px; padding: 8px 0; border-bottom: 1px solid var(--auh-border); }
+.auh-tech-row:last-child { border-bottom: 0; }
+.auh-tech dt { flex: 1 1 140px; color: var(--auh-muted); font-size: 15px; }
+.auh-tech dd { flex: 2 1 160px; margin: 0; font-weight: 600; overflow-wrap: anywhere; }

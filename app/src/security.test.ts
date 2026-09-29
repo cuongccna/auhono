@@ -58,6 +58,25 @@ describe('rà soát mã nguồn (bảo mật)', () => {
   });
 });
 
+describe('Wi-Fi cài đặt thiết bị (mật khẩu)', () => {
+  it('mật khẩu chỉ được đọc trong schemas.ts (kiểm tra) và pages/setup.tsx (hiển thị); getSetup chỉ gọi từ màn hình đó', () => {
+    expect(offenders(/ap_password/)).toEqual(['./lib/schemas.ts', './pages/setup.tsx']);
+    expect(offenders(/\bgetSetup\b/).sort()).toEqual(['./api-client.ts', './pages/setup.tsx']);
+  });
+  it('màn hình setup không dùng bộ nhớ lưu trữ, không tự dựng URL/điều hướng chứa mật khẩu, không import mã QR', () => {
+    const page = source.find(([p]) => p === './pages/setup.tsx')![1];
+    expect(page).not.toMatch(/localStorage|sessionStorage|indexedDB|document\.cookie|console\.|navigate\(|history\.|location\./);
+    expect(page).not.toMatch(/from\s+'[^']*(qr|canvas)[^']*'/i);
+    expect(page).not.toMatch(/<(img|canvas)\b/);
+  });
+  it('api-client không giữ lại phản hồi setup (không cache/biến ngoài hàm)', () => {
+    const client = source.find(([p]) => p === './api-client.ts')![1];
+    const line = client.split('\n').find((l) => l.includes('getSetup:'))!;
+    expect(line).toBeDefined();
+    expect(client).not.toMatch(/\bcache\s*[=:]\s*new\s+Map|const\s+\w*[cC]ache\w*\s*=/);
+  });
+});
+
 describe('mở liên kết ra ngoài (Telegram)', () => {
   it('openOutApp chỉ được gọi trong sdk.ts, và chỉ sau khi kiểm tra isTelegramUrl', () => {
     expect(offenders(/\bopenOutApp\b/)).toEqual(['./sdk.ts']);

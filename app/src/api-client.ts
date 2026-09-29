@@ -13,6 +13,7 @@ import {
   parseOkUntil,
   parseReadings,
   parseRecipient,
+  parseSetup,
   parseRecipientList,
   parseRecipientsResponse,
   parseTelegramLink,
@@ -21,6 +22,7 @@ import {
   type Readings,
   type Recipient,
   type RecipientsResponse,
+  type SetupInfo,
   type TelegramLink,
 } from './lib/schemas.ts';
 import type { RecipientMode } from './lib/telegram.ts';
@@ -246,6 +248,10 @@ export function createApiClient(opts: ApiOptions) {
       noteServerTime(raw);
       return readings;
     },
+
+    /** Wi-Fi cấu hình của thiết bị (SSID + mật khẩu). Chỉ gọi khi người dùng mở màn hình này; không lưu, không log. */
+    getSetup: async (id: string, call?: CallOptions): Promise<SetupInfo> =>
+      parseSetup((await request('GET', `${dev(id)}/setup`, undefined, call)).json),
 
     listRecipients: async (id: string, call?: CallOptions): Promise<Recipient[]> =>
       parseRecipientList((await request('GET', `${dev(id)}/recipients`, undefined, call)).json),

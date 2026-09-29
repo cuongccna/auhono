@@ -29,6 +29,7 @@ vi.mock('./sdk.ts', () => ({
 import Root from './components/app.tsx';
 import { ErrorBoundary } from './components/error-boundary.tsx';
 import { resetClock } from './lib/clock.ts';
+import { formatVnTime } from './lib/format.ts';
 
 Element.prototype.scrollTo = () => undefined;
 // GET lỗi mạng tự thử lại sau 0,8 giây (api-client): nới hạn chờ để test không phụ thuộc tốc độ máy chạy.
@@ -42,6 +43,7 @@ let skew = 0; // giây: server - điện thoại
 const phoneNow = () => Math.floor(Date.now() / 1000);
 const serverNow = () => phoneNow() + skew;
 
+const SETUP = { ap_ssid: 'Auhono-0001', ap_password: 'XP1CZHP3Z0', wifi_qr: 'WIFI:T:WPA;S:Auhono-0001;P:XP1CZHP3Z0;H:false;;' };
 let telegramAvailable: boolean | undefined; // undefined = server cũ (không có trường)
 const TG_URL = 'https://t.me/AuhonoBot?start=tok_ABC-123';
 let devices: Json[];
@@ -93,6 +95,7 @@ function defaultHandler(c: Call): Response {
     recipients = recipients.filter((r) => r.id !== rid);
     return jsonRes({ ok: true });
   }
+  if (c.url === `/v1/devices/${ID}/setup` && c.method === 'GET') return jsonRes(SETUP);
   if (c.url === `/v1/devices/${ID}/ack` && c.method === 'POST') {
     const until = serverNow() + (c.body?.hours ?? 4) * 3600;
     devices = devices.map((d) => ({ ...d, acked_until: until }));
@@ -1288,5 +1291,220 @@ describe('Telegram: đã kết nối', () => {
     fireEvent.click(btn);
     fireEvent.click(btn);
     await waitFor(() => expect(callsTo('PATCH', `/v1/devices/${ID}/recipients/1`)).toHaveLength(1));
+  });
+});
+
+// ───────────────────────────── Lỗi cảm biến (sensor_fault) ─────────────────────────────
+
+const sensorFault = (over: Json = {}) => {
+  const t0 = serverNow();
+  return makeDevice({ phase: 'sensor_fault', last_seen: t0 - 60, last_reading_at: t0 - 40 * 60, latest: { ts: t0 - 40 * 60, temp_c: -19 }, ...over });
+};
+
+describe('lỗi cảm biến', () => {
+  it('huy hiệu riêng "Lỗi cảm biến" + câu giải thích + nguyên nhân + việc cần làm + giờ số đo hợp lệ cuối (giờ server)', async () => {
+    skew = -3600; // điện thoại chạy nhanh 1 giờ: vẫn phải ra "40 phút trước"
+    devices = [sensorFault()];
+    open(`/device/${ID}`);
+    expect((await t('Lỗi cảm biến')).closest('.auh-badge')!.textContent).toContain('\u26a0'); // có ký hiệu, không chỉ màu
+    expect(await t(/Lỗi cảm biến — thiết bị vẫn kết nối nhưng không đọc được nhiệt độ\./)).toBeTruthy();
+    const banner = screen.getByText(/Lỗi cảm biến — thiết bị vẫn kết nối/).closest('[role="alert"]')!;
+    expect(banner.textContent).toContain('dây đầu dò bị đứt, rút ra hoặc kẹt ở gioăng cửa tủ');
+    expect(banner.textContent).toContain('đầu cắm');
+    expect(banner.textContent).toContain('đừng chỉ chờ');
+    expect(banner.textContent).toMatch(/Số đo hợp lệ cuối lúc \d\d:\d\d \d\d\/\d\d \(40 phút trước\)/);
+    expect(screen.queryByText('Mất kết nối')).toBeNull();
+  });
+
+  it('nút "Đã biết, đang xử lý" hiện cho sensor_fault và gọi POST /ack', async () => {
+    devices = [sensorFault()];
+    open(`/device/${ID}`);
+    fireEvent.click(await screen.findByRole('button', { name: ACK }));
+    await waitFor(() => expect(callsTo('POST', `/v1/devices/${ID}/ack`)).toHaveLength(1));
+  });
+
+  it('tạm dừng đè lên lỗi cảm biến', async () => {
+    devices = [sensorFault({ paused_until: serverNow() + 86400 })];
+    open(`/device/${ID}`);
+    expect(await t(/Đang tạm dừng cảnh báo tới/)).toBeTruthy();
+    expect(screen.queryByText(/Lỗi cảm biến — thiết bị vẫn kết nối/)).toBeNull();
+    expect(screen.queryByRole('button', { name: ACK })).toBeNull();
+  });
+
+  it('mất liên lạc (last_seen quá 15 phút) thì là "Mất kết nối", không phải lỗi cảm biến', async () => {
+    devices = [sensorFault({ last_seen: serverNow() - 3600 })];
+    open(`/device/${ID}`);
+    expect(await t('Mất kết nối')).toBeTruthy();
+    expect(screen.queryByText(/Lỗi cảm biến — thiết bị vẫn kết nối/)).toBeNull();
+  });
+
+  it('phase LẠ của server mới: hiện "Cần kiểm tra", không lỗi, không ẩn thiết bị (màn hình chính và chi tiết)', async () => {
+    devices = [makeDevice({ phase: 'quantum_flux' })];
+    open('/');
+    expect(await t('Cần kiểm tra')).toBeTruthy();
+    expect(screen.getByText('Tủ kem')).toBeTruthy();
+    cleanup();
+    open(`/device/${ID}`);
+    expect(await t(/Thiết bị đang ở một trạng thái mà ứng dụng chưa hiểu/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: ACK })).toBeTruthy(); // phase khác ok => vẫn cho "Đã biết"
+  });
+
+  it('màn hình chính: lỗi cảm biến và báo động lên đầu, bình thường và tạm dừng xuống cuối', async () => {
+    const t0 = serverNow();
+    const base = (id: string, name: string, over: Json) => makeDevice({ id, name, ...over });
+    devices = [
+      base('AUH-000002', 'Tủ B (bình thường)', {}),
+      base('AUH-000003', 'Tủ C (tạm dừng)', { paused_until: t0 + 86400 }),
+      base('AUH-000004', 'Tủ D (cảm biến)', { phase: 'sensor_fault', last_reading_at: t0 - 2400 }),
+      base('AUH-000005', 'Tủ E (báo động)', { phase: 'temp_alarm', latest: { ts: t0 - 60, temp_c: -10 } }),
+      base('AUH-000006', 'Tủ F (mất kết nối)', { phase: 'offline', last_seen: t0 - 7200, latest: { ts: t0 - 7200, temp_c: -19 } }),
+    ];
+    open('/');
+    await t('Tủ B (bình thường)');
+    const names = Array.from(document.querySelectorAll('.auh-device .auh-name')).map((e) => e.textContent);
+    expect(names).toEqual(['Tủ D (cảm biến)', 'Tủ E (báo động)', 'Tủ F (mất kết nối)', 'Tủ B (bình thường)', 'Tủ C (tạm dừng)']);
+    expect(screen.getByText(/Không đọc được nhiệt độ — kiểm tra dây đầu dò/)).toBeTruthy();
+  });
+
+  it('báo động: dùng alarm_since của server khi có (thay vì suy từ biểu đồ)', async () => {
+    const t0 = serverNow();
+    devices = [makeDevice({ phase: 'temp_alarm', latest: { ts: t0 - 60, temp_c: -12 }, alarm_since: t0 - 3 * 3600 })];
+    open(`/device/${ID}`);
+    expect(await t(new RegExp(`từ khoảng ${formatVnTime(t0 - 3 * 3600)}\\.`))).toBeTruthy();
+  });
+
+  it('trợ giúp nêu loại cảnh báo lỗi cảm biến: 15 phút, vẫn kết nối, nhắc sau 2 giờ rồi 6, 12 giờ, khác mất kết nối', async () => {
+    open(`/device/${ID}`);
+    fireEvent.click(await t('Cảnh báo hoạt động thế nào?'));
+    const li = screen.getByText('Lỗi cảm biến:').closest('li')!;
+    expect(li.textContent).toContain('VẪN kết nối');
+    expect(li.textContent).toContain('15 phút');
+    expect(li.textContent).toContain('Khác với "mất kết nối"');
+    expect(li.textContent).toContain('Nhắc lại sau 2 giờ, rồi cách 6, 12 giờ');
+  });
+});
+
+describe('Thông tin kỹ thuật (diag)', () => {
+  it('gập lại; có sóng Wi-Fi (Tốt/Trung bình/Yếu + dBm), lý do khởi động lại tiếng Việt, thời gian chạy, phần mềm; kèm gợi ý', async () => {
+    devices = [makeDevice({ firmware: '1.0.2', diag_at: serverNow() - 60, diag: { sensor: 'ok', rssi: -82, rst: 'brownout', up: 2 * 86400 + 3600, heap: 80000 } })];
+    open(`/device/${ID}`);
+    const summary = await t('Thông tin kỹ thuật');
+    const details = summary.closest('details')!;
+    expect(details.hasAttribute('open')).toBe(false);
+    for (const [label, value] of [['Sóng Wi-Fi', 'Yếu (-82 dBm)'], ['Lần khởi động lại gần nhất do', 'Điện yếu/sụt áp'], ['Đã chạy liên tục', '2 ngày 1 giờ'], ['Phiên bản phần mềm', '1.0.2']]) {
+      const dt = within(details).getByText(label);
+      expect(dt.nextElementSibling!.textContent).toContain(value);
+    }
+    expect(details.textContent).toContain('củ sạc USB khác');
+    expect(details.textContent).toContain('bộ kích sóng Wi-Fi');
+  });
+
+  it('thiếu diag và firmware (server cũ): không hiện mục này', async () => {
+    devices = [makeDevice({ firmware: null, diag: null })];
+    open(`/device/${ID}`);
+    await t('Bình thường');
+    expect(screen.queryByText('Thông tin kỹ thuật')).toBeNull();
+  });
+
+  it('sóng tốt và cắm điện: không có gợi ý sạc/kích sóng', async () => {
+    devices = [makeDevice({ diag: { rssi: -50, rst: 'poweron' } })];
+    open(`/device/${ID}`);
+    const details = (await t('Thông tin kỹ thuật')).closest('details')!;
+    expect(details.textContent).toContain('Tốt (-50 dBm)');
+    expect(details.textContent).toContain('Cắm điện');
+    expect(details.textContent).not.toContain('củ sạc');
+    expect(details.textContent).not.toContain('kích sóng');
+  });
+});
+
+// ───────────────────────────── Wi-Fi cài đặt thiết bị ─────────────────────────────
+
+describe('Thông tin Wi-Fi cài đặt thiết bị', () => {
+  it('chỉ tải khi mở màn hình: trang chi tiết không gọi /setup; bấm nút mới gọi', async () => {
+    open(`/device/${ID}`);
+    fireEvent.click(await screen.findByRole('button', { name: 'Thông tin Wi-Fi cài đặt thiết bị' }));
+    await t('Tên Wi-Fi của thiết bị');
+    expect(callsTo('GET', `/v1/devices/${ID}/setup`)).toHaveLength(1);
+  });
+
+  it('không mở màn hình thì không có request /setup nào', async () => {
+    open(`/device/${ID}`);
+    await t('Bình thường');
+    expect(calls.some((c) => c.url.endsWith('/setup'))).toBe(false);
+  });
+
+  it('hiện SSID và mật khẩu ký tự lớn tách rời, nút chép từng cái, lời nhắc bảo mật, các bước cài đặt', async () => {
+    open(`/device/${ID}/setup`);
+    const ssid = await screen.findByRole('img', { name: /Tên Wi-Fi: A u h o n o - 0 0 0 1/ });
+    expect(ssid.querySelectorAll('.auh-cred-char')).toHaveLength('Auhono-0001'.length);
+    const pw = screen.getByRole('img', { name: /Mật khẩu: X P 1 C Z H P 3 Z 0/ });
+    expect(Array.from(pw.querySelectorAll('.auh-cred-char')).map((e) => e.textContent).join('')).toBe('XP1CZHP3Z0');
+    fireEvent.click(screen.getByRole('button', { name: 'Sao chép mật khẩu' }));
+    await waitFor(() => expect(sdk.copyText).toHaveBeenCalledWith('XP1CZHP3Z0'));
+    expect(await t('Đã sao chép mật khẩu.')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Sao chép tên Wi-Fi' }));
+    await waitFor(() => expect(sdk.copyText).toHaveBeenCalledWith('Auhono-0001'));
+    expect(screen.getByText('Chỉ chia sẻ mật khẩu này với người cần cài đặt thiết bị.')).toBeTruthy();
+    const steps = screen.getByText('Cách cài đặt Wi-Fi cho thiết bị').closest('section')!.textContent!;
+    for (const part of ['5 giây', '20 phút', '192.168.4.1', '2.4 GHz', 'nhập mật khẩu ở trên']) expect(steps).toContain(part);
+  });
+
+  it('KHÔNG vẽ mã QR: không svg/canvas/img; chuỗi WIFI: chỉ nằm trong mục "Nâng cao" gập lại', async () => {
+    open(`/device/${ID}/setup`);
+    await t('Tên Wi-Fi của thiết bị');
+    expect(document.querySelector('canvas, img, svg.auh-chart, svg')).toBeNull();
+    const details = screen.getByText('Nâng cao').closest('details')!;
+    expect(details.hasAttribute('open')).toBe(false);
+    expect(within(details).getByText(SETUP.wifi_qr)).toBeTruthy();
+    expect(document.body.textContent!.split(SETUP.wifi_qr).length - 1).toBe(1); // xuất hiện đúng một lần
+  });
+
+  it('thiết bị chưa có dữ liệu: bước cài đặt có nút dẫn tới màn hình này', async () => {
+    devices = [makeDevice({ latest: null, last_seen: null })];
+    open(`/device/${ID}`);
+    fireEvent.click(await screen.findByRole('button', { name: 'Xem tên và mật khẩu Wi-Fi của thiết bị' }));
+    expect(await t('Tên Wi-Fi của thiết bị')).toBeTruthy();
+  });
+
+  it('404 (không phải chủ / chưa kích hoạt): báo không tìm thấy, không hiện gì nhạy cảm', async () => {
+    override = (c) => (c.url.endsWith('/setup') ? jsonRes({ error: 'not_found' }, 404) : undefined);
+    open(`/device/${ID}/setup`);
+    expect(await t(/Không tìm thấy thiết bị/)).toBeTruthy();
+    expect(screen.queryByText('Mật khẩu')).toBeNull();
+  });
+
+  it('BẢO MẬT: rời màn hình thì mật khẩu biến khỏi bộ nhớ trang; không lưu storage, không log, không vào URL/history', async () => {
+    const logs = (['log', 'info', 'warn', 'error', 'debug'] as const).map((m) => vi.spyOn(console, m).mockImplementation(() => undefined));
+    const setItem = vi.spyOn(Storage.prototype, 'setItem');
+    try {
+      window.localStorage.clear();
+      window.sessionStorage.clear();
+      const view = open(`/device/${ID}/setup`);
+      await screen.findByRole('img', { name: /Mật khẩu/ });
+      // đang xem: có trên màn hình, nhưng không ở bất kỳ nơi nào khác
+      expect(window.location.href).not.toContain(SETUP.ap_password);
+      expect(JSON.stringify(window.history.state)).not.toContain(SETUP.ap_password);
+      view.unmount();
+      expect(document.body.innerHTML).not.toContain(SETUP.ap_password);
+      expect(document.body.textContent).not.toContain('XP1CZHP3Z0');
+      expect(document.body.innerHTML).not.toContain('P1CZ'); // cả dạng tách ký tự
+      expect(setItem).not.toHaveBeenCalled();
+      expect(window.localStorage.length + window.sessionStorage.length).toBe(0);
+      expect(window.location.href).not.toContain(SETUP.ap_password);
+      expect(JSON.stringify(window.history.state)).not.toContain(SETUP.ap_password);
+      for (const spy of logs) expect(spy).not.toHaveBeenCalled();
+    } finally {
+      logs.forEach((s) => s.mockRestore());
+      setItem.mockRestore();
+    }
+  });
+
+  it('mở lại màn hình thì tải lại (không dùng bản cũ đã giữ lại)', async () => {
+    const first = open(`/device/${ID}/setup`);
+    await screen.findByRole('img', { name: /Mật khẩu/ });
+    first.unmount();
+    open(`/device/${ID}/setup`);
+    await screen.findByRole('img', { name: /Mật khẩu/ });
+    expect(callsTo('GET', `/v1/devices/${ID}/setup`)).toHaveLength(2);
   });
 });

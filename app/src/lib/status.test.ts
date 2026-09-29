@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { deviceStatus, OFFLINE_AFTER_SECONDS, STATUS_LABEL } from './status.ts';
+import { deviceStatus, OFFLINE_AFTER_SECONDS, sortBySeverity, STATUS_LABEL, STATUS_RANK, type DeviceStatus } from './status.ts';
 
 const NOW = 1_800_000_000;
 
@@ -44,5 +44,40 @@ describe('deviceStatus', () => {
     expect(STATUS_LABEL.ok).toBe('Bình thường');
     expect(STATUS_LABEL.alarm).toBe('Đang báo động');
     expect(STATUS_LABEL.offline).toBe('Mất kết nối');
+  });
+});
+
+describe('lỗi cảm biến (sensor_fault)', () => {
+  it('còn liên lạc nhưng phase sensor_fault => "Lỗi cảm biến" (riêng, không phải mất kết nối hay báo động)', () => {
+    expect(deviceStatus({ phase: 'sensor_fault', lastSeen: NOW - 60, nowSeconds: NOW })).toBe('sensor');
+    expect(STATUS_LABEL.sensor).toBe('Lỗi cảm biến');
+  });
+  it('mất liên lạc (last_seen quá 15 phút) đứng TRÊN lỗi cảm biến', () => {
+    expect(deviceStatus({ phase: 'sensor_fault', lastSeen: NOW - OFFLINE_AFTER_SECONDS - 1, nowSeconds: NOW })).toBe('offline');
+  });
+  it('tạm dừng vẫn đè mọi thứ, kể cả lỗi cảm biến', () => {
+    expect(deviceStatus({ phase: 'sensor_fault', lastSeen: NOW - 60, nowSeconds: NOW, pausedUntil: NOW + 100 })).toBe('paused');
+  });
+  it('phase lạ => "Cần kiểm tra" (không ẩn, không giả vờ bình thường)', () => {
+    expect(deviceStatus({ phase: 'quantum_flux', lastSeen: NOW - 60, nowSeconds: NOW })).toBe('unknown');
+    expect(STATUS_LABEL.unknown).toBe('Cần kiểm tra');
+  });
+});
+
+describe('sortBySeverity', () => {
+  const list = (s: DeviceStatus[]) => s.map((status, i) => ({ status, i }));
+  it('báo động và lỗi cảm biến cùng lên đầu, rồi mất kết nối, lạ, chưa có dữ liệu, bình thường, tạm dừng', () => {
+    const out = sortBySeverity(list(['ok', 'paused', 'no_data', 'unknown', 'offline', 'sensor', 'ok', 'alarm']), (x) => x.status).map((x) => x.status);
+    expect(out).toEqual(['sensor', 'alarm', 'offline', 'unknown', 'no_data', 'ok', 'ok', 'paused']);
+  });
+  it('ổn định: cùng mức giữ thứ tự ban đầu (báo động và lỗi cảm biến ngang hàng)', () => {
+    const out = sortBySeverity(list(['sensor', 'alarm', 'sensor', 'alarm']), (x) => x.status).map((x) => x.i);
+    expect(out).toEqual([0, 1, 2, 3]);
+    expect(STATUS_RANK.sensor).toBe(STATUS_RANK.alarm);
+  });
+  it('không sửa mảng gốc', () => {
+    const src = list(['ok', 'alarm']);
+    sortBySeverity(src, (x) => x.status);
+    expect(src.map((x) => x.status)).toEqual(['ok', 'alarm']);
   });
 });

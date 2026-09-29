@@ -24,6 +24,11 @@ describe('canAck: CHỈ hiện "Đã biết, đang xử lý" khi phase != ok và
   it.each(['temp_alarm', 'offline'])('phase %s, chưa ack => hiện', (phase) => {
     expect(canAck({ phase, acked_until: null }, NOW)).toBe(true);
   });
+  it('sensor_fault: nút "Đã biết" hiện (server chỉ chặn phase = ok), ẩn khi đã ack hoặc tạm dừng', () => {
+    expect(canAck({ phase: 'sensor_fault', acked_until: null }, NOW)).toBe(true);
+    expect(canAck({ phase: 'sensor_fault', acked_until: NOW + H }, NOW)).toBe(false);
+    expect(canAck({ phase: 'sensor_fault', acked_until: null, paused_until: NOW + H }, NOW)).toBe(false);
+  });
   it('phase lạ (server thêm trạng thái mới) cũng coi là có sự cố', () => {
     expect(canAck({ phase: 'something_new', acked_until: null }, NOW)).toBe(true);
   });

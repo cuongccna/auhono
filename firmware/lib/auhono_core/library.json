@@ -1,0 +1,10 @@
+{
+  "name": "auhono_core",
+  "version": "1.0.0",
+  "description": "Logic thuần C++17 của Auhono (không phụ thuộc phần cứng): ký request, seq, bộ đệm số đo, backoff, parser phản hồi...",
+  "frameworks": "*",
+  "platforms": "*",
+  "build": {
+    "flags": "-std=gnu++17"
+  }
+}

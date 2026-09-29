@@ -208,6 +208,7 @@ describe('cảnh báo đầu-cuối', () => {
   it('gửi tin lỗi được thử lại ở lần dispatch sau, không mất cảnh báo', async () => {
     const { dispatchPending } = await import('../src/notify.ts');
     const id = await createActiveDevice(h);
+    await testEnv.DB.prepare('UPDATE alert_state SET armed = 1 WHERE device_id = ?').bind(id).run(); // tủ đã từng đạt ngưỡng
     h.notifier.fail = true;
     await run(id, 1, NOW, 25, -10);
     expect(h.notifier.sent).toHaveLength(0);

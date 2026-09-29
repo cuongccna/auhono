@@ -2,9 +2,14 @@
 //
 // Quy tắc (xem docs/PLAN.md, Giai đoạn 2):
 //  - Chống báo nhầm: chỉ báo khi vượt ngưỡng LIÊN TỤC >= breachSeconds.
-//  - Chống làm phiền: báo một lần, nhắc lại mỗi reminderSeconds (tối đa maxReminders
-//    lần), và chỉ báo "đã ổn" khi nhiệt độ về bình thường liên tục >= recoverSeconds.
-//  - Mất kết nối: không có số đo hợp lệ quá offlineSeconds.
+//  - Chịu dao động quanh ngưỡng: về trong ngưỡng ngắn hơn dipSeconds (cảm biến nhiễu, máy nén
+//    chạy/ngắt) KHÔNG làm đếm lại từ đầu.
+//  - Chống làm phiền nhưng không im lặng khi tủ hỏng lâu: báo một lần, nhắc mỗi 30 phút (fastReminders
+//    lần đầu), sau đó mỗi 2 giờ, tối đa maxReminders lần; "đã ổn" khi bình thường liên tục >= recoverSeconds.
+//  - Chưa "vào chế độ báo động" (armed = false) cho tới khi tủ đạt ngưỡng ít nhất một lần: lắp thiết
+//    bị vào tủ đang ấm/vừa rã đông không gây báo động oan. Quá warmupMaxSeconds vẫn ấm thì báo.
+//  - Mất kết nối: không có số đo hợp lệ quá offlineSeconds; thiết bị đã gắn chủ mà chưa từng gửi
+//    số đo sau neverSeenSeconds cũng báo (Wi-Fi 5 GHz, nhập sai mật khẩu...).
 
 export type Phase = 'ok' | 'temp_alarm' | 'offline';
 export type BreachKind = 'high' | 'low';
@@ -18,6 +23,8 @@ export interface AlertState {
   remindersSent: number;
   /** ts số đo mới nhất đã xử lý; số đo cũ hơn (gửi lại muộn) chỉ được lưu, không đổi trạng thái. */
   lastTs: number | null;
+  /** Đã từng thấy nhiệt độ trong ngưỡng kể từ lúc gắn/đổi ngưỡng => cho phép báo động. */
+  armed: boolean;
 }
 
 export interface AlertConfig {
@@ -25,9 +32,19 @@ export interface AlertConfig {
   maxC: number;
   breachSeconds: number;
   recoverSeconds: number;
+  /** Chu kỳ nhắc lại cho `fastReminders` lần đầu. */
   reminderSeconds: number;
+  fastReminders: number;
+  /** Chu kỳ nhắc lại sau đó (tủ hỏng lâu: vẫn nhắc, nhưng thưa hơn). */
+  laterReminderSeconds: number;
   maxReminders: number;
   offlineSeconds: number;
+  /** Đã gắn chủ mà chưa từng có số đo: sau bao lâu thì báo. */
+  neverSeenSeconds: number;
+  /** Về trong ngưỡng ngắn hơn mức này không tính là "hết vượt ngưỡng". */
+  dipSeconds: number;
+  /** Tối đa bao lâu chờ tủ đạt ngưỡng lần đầu trước khi vẫn báo động. */
+  warmupMaxSeconds: number;
 }
 
 export type AlertEventKind =
@@ -59,8 +76,13 @@ export interface StepResult {
 export const DEFAULTS = {
   recoverSeconds: 5 * 60,
   reminderSeconds: 30 * 60,
-  maxReminders: 4,
+  fastReminders: 4,
+  laterReminderSeconds: 2 * 3600,
+  maxReminders: 16, // 4 x 30 phút + 12 x 2 giờ = 26 giờ
   offlineSeconds: 15 * 60,
+  neverSeenSeconds: 60 * 60,
+  dipSeconds: 2 * 60,
+  warmupMaxSeconds: 12 * 3600,
 } as const;
 
 export function initialState(): AlertState {
@@ -72,6 +94,7 @@ export function initialState(): AlertState {
     lastNotifiedAt: null,
     remindersSent: 0,
     lastTs: null,
+    armed: false,
   };
 }
 
@@ -99,6 +122,7 @@ export function step(prev: AlertState, r: Reading, cfg: AlertConfig): StepResult
     s.breachSince = null;
     s.inRangeSince = null;
     if (breach === null) {
+      s.armed = true;
       events.push({ kind: 'reconnected', ts: r.ts, tempC: r.c, detail: null });
       return { state: s, events };
     }
@@ -110,16 +134,27 @@ export function step(prev: AlertState, r: Reading, cfg: AlertConfig): StepResult
 
   if (s.phase === 'ok') {
     if (breach === null) {
-      s.breachKind = null;
-      s.breachSince = null;
+      s.armed = true;
+      if (s.breachSince !== null) {
+        // Đang đếm vượt ngưỡng: chỉ huỷ khi về trong ngưỡng đủ lâu (bỏ qua dao động ngắn).
+        s.inRangeSince ??= r.ts;
+        if (r.ts - s.inRangeSince >= cfg.dipSeconds) {
+          s.breachKind = null;
+          s.breachSince = null;
+          s.inRangeSince = null;
+        }
+      }
       return { state: s, events };
     }
+    s.inRangeSince = null;
     if (s.breachSince === null || s.breachKind !== breach) {
       s.breachKind = breach;
       s.breachSince = r.ts;
     }
-    if (r.ts - s.breachSince >= cfg.breachSeconds) {
+    const needed = s.armed ? cfg.breachSeconds : cfg.warmupMaxSeconds;
+    if (r.ts - s.breachSince >= needed) {
       s.phase = 'temp_alarm';
+      s.armed = true;
       s.inRangeSince = null;
       s.lastNotifiedAt = r.ts;
       s.remindersSent = 0;
@@ -147,34 +182,42 @@ export function step(prev: AlertState, r: Reading, cfg: AlertConfig): StepResult
   return { state: s, events };
 }
 
+/** Khoảng cách tới lần nhắc kế tiếp: dày lúc đầu, thưa dần khi sự cố kéo dài. */
+function reminderInterval(sent: number, cfg: AlertConfig): number {
+  return sent < cfg.fastReminders ? cfg.reminderSeconds : cfg.laterReminderSeconds;
+}
+
 /**
  * Xử lý theo thời gian (cron 5 phút): phát hiện im lặng và nhắc lại.
- * `lastSeen` = ts nhận số đo hợp lệ gần nhất (null nếu thiết bị chưa từng gửi).
+ * `lastSeen` = giờ nhận số đo gần nhất (null nếu chưa từng gửi); `claimedAt` = giờ gắn chủ.
  */
 export function tick(
   prev: AlertState,
   now: number,
   lastSeen: number | null,
   cfg: AlertConfig,
+  claimedAt: number | null = null,
 ): StepResult {
   const s: AlertState = { ...prev };
   const events: AlertEvent[] = [];
-  if (lastSeen === null) return { state: s, events };
+  const silentSince = lastSeen ?? claimedAt;
+  if (silentSince === null) return { state: s, events };
+  const limit = lastSeen !== null ? cfg.offlineSeconds : cfg.neverSeenSeconds;
 
-  if (s.phase !== 'offline' && now - lastSeen >= cfg.offlineSeconds) {
+  if (s.phase !== 'offline' && now - silentSince >= limit) {
     s.phase = 'offline';
     s.breachKind = null;
     s.breachSince = null;
     s.inRangeSince = null;
     s.lastNotifiedAt = now;
     s.remindersSent = 0;
-    events.push({ kind: 'offline', ts: now, tempC: null, detail: null });
+    events.push({ kind: 'offline', ts: now, tempC: null, detail: lastSeen === null ? 'never_seen' : null });
     return { state: s, events };
   }
 
   const due =
     s.lastNotifiedAt !== null &&
-    now - s.lastNotifiedAt >= cfg.reminderSeconds &&
+    now - s.lastNotifiedAt >= reminderInterval(s.remindersSent, cfg) &&
     s.remindersSent < cfg.maxReminders;
   if (!due) return { state: s, events };
 
@@ -185,7 +228,7 @@ export function tick(
   } else if (s.phase === 'offline') {
     s.lastNotifiedAt = now;
     s.remindersSent += 1;
-    events.push({ kind: 'offline_reminder', ts: now, tempC: null, detail: null });
+    events.push({ kind: 'offline_reminder', ts: now, tempC: null, detail: lastSeen === null ? 'never_seen' : null });
   }
   return { state: s, events };
 }

@@ -6,11 +6,15 @@ trong `server/src/zns.ts`; đổi tên phải sửa cả hai nơi. Sau khi đư�
 
 Tham số dùng chung: `device_name` (tên tủ), `temperature` (vd. `-9.5°C`), `threshold` (vd. `tối đa -18°C`), `time` (vd. `14:05 29/09`).
 
-| Biến cấu hình            | Khi nào gửi                                   | Gợi ý nội dung                                                                 |
-|--------------------------|-----------------------------------------------|--------------------------------------------------------------------------------|
-| `ZNS_TEMPLATE_ALERT`     | Nhiệt độ vượt ngưỡng (và nhắc lại sau 30 phút) | "{device_name} đang {temperature} lúc {time}, vượt ngưỡng ({threshold}). Hãy kiểm tra tủ." |
-| `ZNS_TEMPLATE_OFFLINE`   | Mất kết nối > 15 phút (và nhắc lại)            | "{device_name} mất kết nối từ {time} (có thể mất điện hoặc mất Wi-Fi). Hãy kiểm tra."      |
-| `ZNS_TEMPLATE_RECOVERED` | Nhiệt độ về bình thường / kết nối lại          | "{device_name} đã trở lại bình thường lúc {time} ({temperature})."             |
+| Biến cấu hình            | Khi nào gửi                                                                 | Gợi ý nội dung                                                                                         |
+|--------------------------|-----------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------|
+| `ZNS_TEMPLATE_ALERT`     | Nhiệt độ vượt ngưỡng liên tục 15 phút; nhắc lại (30 phút x4, sau đó 2 giờ)   | "{device_name} đang {temperature} lúc {time}, vượt ngưỡng ({threshold}). Hãy kiểm tra tủ."             |
+| `ZNS_TEMPLATE_OFFLINE`   | Không nhận được số đo > 15 phút, hoặc thiết bị mới gắn > 60 phút chưa kết nối | "{device_name} không gửi được dữ liệu (tính đến {time}). Có thể mất điện, mất Wi-Fi hoặc đứt dây đầu dò. Hãy kiểm tra." |
+| `ZNS_TEMPLATE_RECOVERED` | Nhiệt độ về bình thường / thiết bị kết nối lại                               | "{device_name} đã trở lại bình thường lúc {time} ({temperature})."                                     |
+
+Lời lẽ mẫu OFFLINE cố ý trung tính vì máy chủ không phân biệt được các nguyên nhân: mất điện, mất Wi-Fi, ISP
+hỏng, **dây đầu dò bị gioăng cửa cắt** (rất hay gặp; chip không có số đo hợp lệ thì không gửi gì), hay thiết bị mới
+lắp chưa từng kết nối (Wi-Fi 5 GHz, sai mật khẩu).
 
 ## Lưu ý
 

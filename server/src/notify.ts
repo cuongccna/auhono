@@ -26,10 +26,14 @@ export class LogNotifier implements Notifier {
   }
 }
 
-const MAX_ATTEMPTS = 5;
-const BATCH_SIZE = 25;
+/** Số lần gửi tối đa cho một tin; thất bại cách quãng dần (5, 10, 15... phút) nên chịu được ZNS lỗi vài giờ. */
+export const MAX_ATTEMPTS = 8;
+const BATCH_SIZE = 20;
+/** Tin ở trạng thái 'sending' quá lâu (tiến trình chết giữa chừng) sẽ được đưa về hàng đợi. */
+const STALE_SENDING_SECONDS = 300;
+const RETRY_STEP_SECONDS = 300;
 
-interface PendingRow {
+interface ClaimedRow {
   id: number;
   phone: string;
   attempts: number;
@@ -42,8 +46,33 @@ interface PendingRow {
   max_c: number;
 }
 
-/** Gửi các tin đang chờ. Trả về số tin gửi thành công. */
+/**
+ * Gửi các tin đang chờ, trả về số tin gửi thành công.
+ *
+ * Cron và request thiết bị có thể gọi hàm này cùng lúc, nên tin được "nhận việc" bằng một UPDATE
+ * nguyên tử (pending -> sending): mỗi tin chỉ một bên gửi. Số lần thử tăng ngay lúc nhận, nên dù tiến
+ * trình chết giữa chừng cũng không gửi lặp vô hạn. Chỉ dùng ít truy vấn D1 (gói miễn phí giới hạn 50/lượt).
+ */
 export async function dispatchPending(db: D1Database, notifier: Notifier, now: number): Promise<number> {
+  await db
+    .prepare("UPDATE notifications SET status = 'pending' WHERE status = 'sending' AND updated_at < ?")
+    .bind(now - STALE_SENDING_SECONDS)
+    .run();
+
+  const claimed = await db
+    .prepare(
+      `UPDATE notifications SET status = 'sending', attempts = attempts + 1, updated_at = ?1
+       WHERE id IN (
+         SELECT id FROM notifications
+         WHERE status = 'pending' AND attempts < ?2 AND updated_at <= ?1 - attempts * ?3
+         ORDER BY id LIMIT ?4)
+       RETURNING id`,
+    )
+    .bind(now, MAX_ATTEMPTS, RETRY_STEP_SECONDS, BATCH_SIZE)
+    .all<{ id: number }>();
+  if (claimed.results.length === 0) return 0;
+
+  const ids = claimed.results.map((r) => r.id);
   const { results } = await db
     .prepare(
       `SELECT n.id, n.phone, n.attempts, e.kind, e.ts, e.temp_c, e.detail,
@@ -51,12 +80,12 @@ export async function dispatchPending(db: D1Database, notifier: Notifier, now: n
        FROM notifications n
        JOIN alert_events e ON e.id = n.event_id
        JOIN devices d ON d.id = e.device_id
-       WHERE n.status = 'pending' AND n.attempts < ?
-       ORDER BY n.id LIMIT ?`,
+       WHERE n.id IN (${ids.map(() => '?').join(',')})`,
     )
-    .bind(MAX_ATTEMPTS, BATCH_SIZE)
-    .all<PendingRow>();
+    .bind(...ids)
+    .all<ClaimedRow>();
 
+  const updates: D1PreparedStatement[] = [];
   let sent = 0;
   for (const n of results) {
     try {
@@ -70,19 +99,24 @@ export async function dispatchPending(db: D1Database, notifier: Notifier, now: n
         minC: n.min_c,
         maxC: n.max_c,
       });
-      await db
-        .prepare("UPDATE notifications SET status = 'sent', attempts = attempts + 1, last_error = NULL, updated_at = ? WHERE id = ?")
-        .bind(now, n.id)
-        .run();
+      updates.push(
+        db.prepare("UPDATE notifications SET status = 'sent', last_error = NULL, updated_at = ? WHERE id = ?").bind(now, n.id),
+      );
       sent++;
     } catch (err) {
-      const attempts = n.attempts + 1;
       const message = (err instanceof Error ? err.message : String(err)).slice(0, 300);
-      await db
-        .prepare('UPDATE notifications SET status = ?, attempts = ?, last_error = ?, updated_at = ? WHERE id = ?')
-        .bind(attempts >= MAX_ATTEMPTS ? 'failed' : 'pending', attempts, message, now, n.id)
-        .run();
+      updates.push(
+        db
+          .prepare('UPDATE notifications SET status = ?, last_error = ?, updated_at = ? WHERE id = ?')
+          .bind(n.attempts >= MAX_ATTEMPTS ? 'failed' : 'pending', message, now, n.id),
+      );
     }
   }
+  // Tin nhận việc nhưng không còn dữ liệu liên kết (thiết bị bị xóa): đóng lại, đừng để kẹt ở 'sending'.
+  const found = new Set(results.map((r) => r.id));
+  for (const id of ids) {
+    if (!found.has(id)) updates.push(db.prepare("UPDATE notifications SET status = 'failed', last_error = 'orphan' WHERE id = ?").bind(id));
+  }
+  if (updates.length > 0) await db.batch(updates);
   return sent;
 }

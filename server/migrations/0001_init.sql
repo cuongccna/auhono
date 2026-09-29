@@ -13,6 +13,7 @@ CREATE TABLE accounts (
 CREATE TABLE devices (
   id             TEXT PRIMARY KEY,                       -- ví dụ AUH-000001
   account_id     INTEGER REFERENCES accounts(id) ON DELETE SET NULL,
+  claimed_at     INTEGER,                                -- lúc gắn chủ (phát hiện thiết bị chưa từng kết nối)
   name           TEXT NOT NULL DEFAULT 'Tủ lạnh',
   kind           TEXT NOT NULL DEFAULT 'freezer' CHECK (kind IN ('freezer', 'chiller')),
   min_c          REAL NOT NULL DEFAULT -30,              -- ngưỡng dưới (°C)
@@ -62,6 +63,8 @@ CREATE TABLE alert_state (
   breach_since     INTEGER,   -- ts của số đo đầu tiên trong chuỗi vượt ngưỡng liên tục
   in_range_since   INTEGER,   -- đang báo động mà số đo đã về bình thường từ lúc nào
   last_ts          INTEGER,   -- ts số đo mới nhất đã đưa vào máy trạng thái (bỏ qua số đo cũ hơn)
+  armed            INTEGER NOT NULL DEFAULT 0,  -- đã thấy nhiệt độ trong ngưỡng => cho phép báo động
+  version          INTEGER NOT NULL DEFAULT 0,  -- khóa lạc quan: mọi thay đổi trạng thái đều so-và-tăng version
   last_notified_at INTEGER,
   reminders_sent   INTEGER NOT NULL DEFAULT 0
 );
@@ -70,6 +73,7 @@ CREATE TABLE alert_state (
 -- gửi tin thất bại thì cron thử lại, không mất cảnh báo.
 CREATE TABLE alert_events (
   id        INTEGER PRIMARY KEY AUTOINCREMENT,
+  token     TEXT NOT NULL UNIQUE,   -- định danh ngẫu nhiên: gắn tin nhắn đúng sự kiện, không phụ thuộc last_insert_rowid()
   device_id TEXT NOT NULL,
   kind      TEXT NOT NULL,   -- temp_alarm | temp_reminder | offline | offline_reminder | recovered | reconnected
   ts        INTEGER NOT NULL,
@@ -82,12 +86,13 @@ CREATE TABLE notifications (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
   event_id   INTEGER NOT NULL REFERENCES alert_events(id) ON DELETE CASCADE,
   phone      TEXT NOT NULL,
-  status     TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'sent', 'failed')),
+  status     TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'sending', 'sent', 'failed')),
   attempts   INTEGER NOT NULL DEFAULT 0,
   last_error TEXT,
   updated_at INTEGER NOT NULL
 );
-CREATE INDEX idx_notifications_pending ON notifications(status) WHERE status = 'pending';
+CREATE INDEX idx_notifications_pending ON notifications(status) WHERE status IN ('pending', 'sending');
+CREATE INDEX idx_notifications_event ON notifications(event_id);
 
 -- Kho khóa-giá trị nhỏ (token Zalo OA, cần lưu vì refresh token xoay vòng).
 CREATE TABLE kv (
@@ -104,3 +109,10 @@ CREATE TABLE firmware_releases (
   signature  TEXT NOT NULL,
   created_at INTEGER NOT NULL
 );
+
+-- Đếm lần nhập sai mã kích hoạt theo tài khoản (chặn dò mã).
+CREATE TABLE claim_failures (
+  account_id INTEGER NOT NULL,
+  ts         INTEGER NOT NULL
+);
+CREATE INDEX idx_claim_failures ON claim_failures(account_id, ts);

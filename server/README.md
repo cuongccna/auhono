@@ -41,13 +41,56 @@ npx wrangler d1 execute auhono --remote --file out/devices.sql
 
 Chưa cấu hình ZNS thì cảnh báo chỉ được ghi log (`LogNotifier`), hàng đợi vẫn chạy.
 
+## Hành vi cảnh báo (đã tính tới tình huống thực tế)
+
+| Tình huống | Cách xử lý |
+|------------|------------|
+| Mở cửa tủ lấy hàng / xả đá | Chỉ báo khi vượt ngưỡng **liên tục** 15 phút (chỉnh 5–60 phút cho từng tủ) |
+| Cảm biến nhiễu / máy nén chạy-ngắt quanh ngưỡng | Về trong ngưỡng < 2 phút không reset bộ đếm |
+| Lắp thiết bị vào tủ đang ấm, vừa rã đông, hoặc đổi ngưỡng | Chưa "armed" cho tới khi tủ đạt ngưỡng ít nhất một lần; quá 12 giờ vẫn ấm thì báo. Đổi ngưỡng hủy báo động cũ (không gửi "đã ổn") |
+| Tủ hỏng kéo dài qua đêm | Nhắc 30 phút x4, sau đó mỗi 2 giờ, tổng tối đa 16 nhắc (~26 giờ); không im lặng sau 2 giờ |
+| Nhiệt độ về bình thường thoáng qua | Chỉ báo "đã ổn" khi bình thường liên tục 5 phút |
+| Mất điện / mất Wi-Fi / đứt dây đầu dò | Im lặng > 15 phút thì báo "mất kết nối"; nhắc lại như trên; có số đo lại thì báo "đã kết nối lại" |
+| Thiết bị mới lắp nhưng chưa từng kết nối (Wi-Fi 5 GHz, sai mật khẩu) | Sau 60 phút kể từ lúc gắn chủ thì báo |
+| Chưa có người nhận cảnh báo | `GET /v1/devices` trả `recipient_count: 0` để app cảnh báo chủ quán |
+| ZNS lỗi tạm thời | Hàng đợi thử lại tối đa 8 lần, giãn cách 5/10/15... phút (chịu được ZNS lỗi vài giờ); thất bại hẳn hiện ở `notify_failures_24h` |
+| Cron và request thiết bị chạy cùng lúc | Khóa lạc quan theo `version` + nhận việc nguyên tử: không báo trùng, không "mất kết nối" oan |
+
+## Vận hành (SQL hữu ích)
+
+```bash
+# Thu hồi thiết bị (mất, bị lộ khóa). Phải cấp thiết bị/khóa mới; khóa suy từ id nên không xoay riêng được.
+npx wrangler d1 execute auhono --remote --command "UPDATE devices SET revoked = 1 WHERE id = 'AUH-000123'"
+# Gỡ chủ (khách bán/đổi máy, mất điện thoại): để chủ mới quét QR lại
+npx wrangler d1 execute auhono --remote --command "UPDATE devices SET account_id = NULL, claimed_at = NULL WHERE id = 'AUH-000123'"
+# Chip xóa flash nên seq về 0 (thiết bị tự nhảy qua khi nhận 409 replay; chỉ cần đặt lại khi cần)
+npx wrangler d1 execute auhono --remote --command "UPDATE devices SET last_seq = 0 WHERE id = 'AUH-000123'"
+# Tin nhắn lỗi gần đây
+npx wrangler d1 execute auhono --remote --command "SELECT phone, last_error, updated_at FROM notifications WHERE status = 'failed' ORDER BY id DESC LIMIT 20"
+```
+
+## Giới hạn gói Cloudflare
+
+- **Workers miễn phí giới hạn ~50 truy vấn D1 mỗi lần chạy** và 10 ms CPU/request. Cron đã tối ưu (1 truy vấn đọc cho cả đội)
+  nhưng khi đội thiết bị lớn hoặc có nhiều tin nhắn cùng lúc, nên dùng **Workers Paid (~5$/tháng)**, rẻ hơn nhiều so với
+  rủi ro bỏ sót cảnh báo. Trước khi bán đại trà, coi đây là chi phí cố định.
+- D1: mỗi thiết bị ghi ~2,3k dòng/ngày ⇒ ~40 thiết bị chạm mức 100k dòng ghi/ngày của gói miễn phí.
+
 ## Bảo mật — cần biết
 
 - **`MASTER_SECRET` là điểm yếu chung**: lộ nó là giả mạo được mọi thiết bị. Mất nó là mất khả năng xác thực máy đã giao.
   Sao lưu offline. (Đánh đổi có chủ đích: không lưu khóa trong DB, không cần bảng khóa.)
 - Chống phát lại bằng `seq` tăng nghiêm ngặt (cập nhật nguyên tử trong D1) + cửa sổ thời gian ±5 phút.
-- **Chưa có giới hạn tốc độ** trên `/v1/devices/claim` (mã 50 bit, khó dò nhưng nên có). Thêm Cloudflare Rate Limiting
-  rule cho `/v1/*` ở dashboard trước khi mở rộng.
-- Đọc-sửa-ghi trạng thái cảnh báo không khóa: hai gói cùng thiết bị tới cùng lúc có thể làm mất một bước đếm.
-  Chip gửi tuần tự nên bỏ qua ở quy mô thử nghiệm.
+- Kích hoạt: tối đa 10 lần nhập sai mã/giờ/tài khoản (429 `too_many_attempts`). Các endpoint khác **chưa có** giới hạn tốc độ:
+  thêm Cloudflare Rate Limiting rule cho `/v1/*` trước khi mở rộng.
+- Trạng thái cảnh báo dùng khóa lạc quan (`version`): va chạm giữa cron và request thiết bị được phát hiện và thử lại.
 - Quota D1 gói free: ~100k dòng ghi/ngày. Mỗi thiết bị ghi ~2k dòng/ngày ⇒ tới khoảng 50 thiết bị thì cần gói trả phí (~5$/tháng).
+
+## Chưa làm (biết rõ, quyết định sau)
+
+- **Chia sẻ thiết bị cho nhiều tài khoản** (vợ chồng cùng xem app): hiện mỗi thiết bị thuộc một tài khoản; người khác chỉ nhận tin nhắn.
+- **Tin nhắn thử** cho người nhận mới (để phát hiện gõ nhầm số trước khi có sự cố) — tốn thêm phí ZNS và một mẫu tin.
+- **Xác nhận đồng ý của người nhận**: chủ quán có thể nhập số của người khác; nên có bước xác nhận trước khi bán đại trà.
+- **Kênh dự phòng** khi ZNS bị từ chối/lỗi kéo dài (SMS, push): hiện chỉ có hàng đợi thử lại và `notify_failures_24h`.
+- **Khóa riêng từng thiết bị xoay được**: khóa suy từ `MASTER_SECRET` + id nên thu hồi = cấp id mới.
+- **Ngưỡng theo mùa/tủ khác nhau** (xả đá định kỳ có lịch): hiện dùng ngưỡng cố định + thời gian vượt liên tục.

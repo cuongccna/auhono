@@ -12,6 +12,7 @@ import {
 import { ingest } from './ingest.ts';
 import { dispatchPending, type Notifier } from './notify.ts';
 import { zaloVerifier, type OwnerVerifier } from './owner-auth.ts';
+import { resetStateStmt } from './db.ts';
 import { KIND_PRESETS, type DeviceRow, type Env } from './types.ts';
 
 export interface Deps {
@@ -29,7 +30,35 @@ export const MAX_CLOCK_SKEW = 300;
 const MAX_BODY_BYTES = 4096;
 const MAX_RECIPIENTS = 5;
 
+/** Sai mã kích hoạt tối đa bao nhiêu lần / giờ / tài khoản (chặn dò mã). */
+const MAX_CLAIM_FAILURES_PER_HOUR = 10;
+
 const deviceIdRe = /^[A-Z0-9-]{3,32}$/;
+
+/** Đọc body có giới hạn kích thước theo luồng: body khổng lồ bị ngắt sớm, không nạp hết vào bộ nhớ. */
+async function readBodyCapped(req: Request, max: number): Promise<Uint8Array | null> {
+  const reader = req.body?.getReader();
+  if (!reader) return new Uint8Array();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.length;
+    if (total > max) {
+      await reader.cancel();
+      return null;
+    }
+    chunks.push(value);
+  }
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const c of chunks) {
+    out.set(c, off);
+    off += c.length;
+  }
+  return out;
+}
 
 export function createApp(deps: Deps) {
   const app = new Hono<{ Bindings: Env; Variables: Vars }>();
@@ -68,8 +97,8 @@ export function createApp(deps: Deps) {
     }
     const declared = Number(c.req.header('Content-Length') ?? 0);
     if (declared > MAX_BODY_BYTES) return c.json({ error: 'too_large' }, 413);
-    const body = new Uint8Array(await c.req.arrayBuffer());
-    if (body.length > MAX_BODY_BYTES) return c.json({ error: 'too_large' }, 413);
+    const body = await readBodyCapped(c.req.raw, MAX_BODY_BYTES);
+    if (body === null) return c.json({ error: 'too_large' }, 413);
 
     // Luôn tính khóa + kiểm chữ ký TRƯỚC khi tra DB: thiết bị không tồn tại và chữ ký sai
     // cho cùng một phản hồi, không dò được mã thiết bị.
@@ -185,28 +214,49 @@ export function createApp(deps: Deps) {
     const parsed = claimSchema.safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) return c.json({ error: 'bad_request' }, 400);
     const { device_id, code, name, kind = 'freezer' } = parsed.data;
+    const accountId = c.get('accountId');
+    const now = deps.now();
+
+    // Chặn dò mã: quá nhiều lần sai trong 1 giờ thì từ chối mọi lần thử của tài khoản này.
+    const fails = await c.env.DB
+      .prepare('SELECT COUNT(*) AS n FROM claim_failures WHERE account_id = ? AND ts > ?')
+      .bind(accountId, now - 3600)
+      .first<{ n: number }>();
+    if ((fails?.n ?? 0) >= MAX_CLAIM_FAILURES_PER_HOUR) return c.json({ error: 'too_many_attempts' }, 429);
 
     const expected = await deriveActivationCode(c.env.MASTER_SECRET, device_id);
     const codeOk = await timingSafeEqualStr(code.toUpperCase().replace(/[^0-9A-Z]/g, ''), expected);
     const device = await c.env.DB.prepare('SELECT * FROM devices WHERE id = ?').bind(device_id).first<DeviceRow>();
     // Sai mã / không tồn tại / đã thu hồi / đã có chủ khác: cùng một phản hồi.
-    const mine = device?.account_id === c.get('accountId');
+    const mine = device?.account_id === accountId;
     if (!codeOk || !device || device.revoked || (device.account_id !== null && !mine)) {
+      await c.env.DB.prepare('INSERT INTO claim_failures (account_id, ts) VALUES (?, ?)').bind(accountId, now).run();
       return c.json({ error: 'invalid_code' }, 404);
     }
+    // Gọi lại khi đã là chủ (mất phản hồi lần trước, bấm đúp) thì coi như thành công, không đặt lại gì.
     if (!mine) {
       const preset = KIND_PRESETS[kind];
       await c.env.DB.batch([
         c.env.DB
-          .prepare('UPDATE devices SET account_id = ?, name = ?, kind = ?, min_c = ?, max_c = ? WHERE id = ? AND account_id IS NULL')
-          .bind(c.get('accountId'), name ?? device.name, kind, preset.min_c, preset.max_c, device_id),
-        c.env.DB.prepare('INSERT OR IGNORE INTO alert_state (device_id) VALUES (?)').bind(device_id),
+          .prepare('UPDATE devices SET account_id = ?, claimed_at = ?, name = ?, kind = ?, min_c = ?, max_c = ? WHERE id = ? AND account_id IS NULL')
+          .bind(accountId, now, name ?? device.name, kind, preset.min_c, preset.max_c, device_id),
+        // Trạng thái mới: chưa "armed" cho tới khi tủ đạt ngưỡng (lắp vào tủ đang ấm không báo oan).
+        resetStateStmt(c.env.DB, device_id),
       ]);
     }
     return c.json({ ok: true, device_id });
   });
 
-  const publicDevice = (d: DeviceRow, latest: { ts: number; temp_c: number } | null, phase: string | null) => ({
+  type ListRow = DeviceRow & {
+    phase: string | null;
+    armed: number | null;
+    latest_ts: number | null;
+    latest_c: number | null;
+    recipient_count: number;
+    notify_failures_24h: number;
+  };
+
+  const publicDevice = (d: ListRow) => ({
     id: d.id,
     name: d.name,
     kind: d.kind,
@@ -214,28 +264,37 @@ export function createApp(deps: Deps) {
     max_c: d.max_c,
     breach_minutes: d.breach_minutes,
     last_seen: d.last_seen,
+    claimed_at: d.claimed_at,
     firmware: d.firmware,
-    phase: phase ?? 'ok',
-    latest,
+    phase: d.phase ?? 'ok',
+    // false = chưa cảnh báo nhiệt độ vì tủ chưa đạt ngưỡng lần nào (mới lắp / mới đổi ngưỡng).
+    armed: d.armed === 1,
+    // 0 = sẽ không có tin nhắn nào được gửi: app phải cảnh báo chủ quán.
+    recipient_count: d.recipient_count,
+    // > 0 = có tin không gửi được trong 24 giờ qua (sai số, chưa theo dõi OA...).
+    notify_failures_24h: d.notify_failures_24h,
+    latest: d.latest_ts === null ? null : { ts: d.latest_ts, temp_c: d.latest_c! },
   });
 
   app.get('/v1/devices', ownerAuth, async (c) => {
+    const now = deps.now();
     const { results } = await c.env.DB
       .prepare(
-        `SELECT d.*, s.phase AS phase,
+        `SELECT d.*, s.phase AS phase, s.armed AS armed,
            (SELECT ts FROM readings r WHERE r.device_id = d.id ORDER BY ts DESC LIMIT 1) AS latest_ts,
-           (SELECT temp_c FROM readings r WHERE r.device_id = d.id ORDER BY ts DESC LIMIT 1) AS latest_c
+           (SELECT temp_c FROM readings r WHERE r.device_id = d.id ORDER BY ts DESC LIMIT 1) AS latest_c,
+           (SELECT COUNT(*) FROM recipients rc WHERE rc.device_id = d.id) AS recipient_count,
+           (SELECT COUNT(*) FROM alert_events ev JOIN notifications n ON n.event_id = ev.id
+             WHERE ev.device_id = d.id AND n.status = 'failed' AND n.updated_at >= ?2) AS notify_failures_24h
          FROM devices d LEFT JOIN alert_state s ON s.device_id = d.id
-         WHERE d.account_id = ? AND d.revoked = 0 ORDER BY d.created_at`,
+         WHERE d.account_id = ?1 AND d.revoked = 0 ORDER BY d.created_at`,
       )
-      .bind(c.get('accountId'))
-      .all<DeviceRow & { phase: string | null; latest_ts: number | null; latest_c: number | null }>();
+      .bind(c.get('accountId'), now - 24 * 3600)
+      .all<ListRow>();
     return c.json({
       // Giờ server để app tính "mất kết nối"/"x phút trước" không phụ thuộc đồng hồ điện thoại.
-      server_time: deps.now(),
-      devices: results.map((r) =>
-        publicDevice(r, r.latest_ts === null ? null : { ts: r.latest_ts, temp_c: r.latest_c! }, r.phase),
-      ),
+      server_time: now,
+      devices: results.map(publicDevice),
     });
   });
 
@@ -262,10 +321,15 @@ export function createApp(deps: Deps) {
     const max_c = p.max_c ?? preset?.max_c ?? device.max_c;
     if (min_c >= max_c) return c.json({ error: 'bad_range' }, 400);
 
-    await c.env.DB
-      .prepare('UPDATE devices SET name = ?, kind = ?, min_c = ?, max_c = ?, breach_minutes = ? WHERE id = ?')
-      .bind(p.name ?? device.name, p.kind ?? device.kind, min_c, max_c, p.breach_minutes ?? device.breach_minutes, device.id)
-      .run();
+    const stmts = [
+      c.env.DB
+        .prepare('UPDATE devices SET name = ?, kind = ?, min_c = ?, max_c = ?, breach_minutes = ? WHERE id = ?')
+        .bind(p.name ?? device.name, p.kind ?? device.kind, min_c, max_c, p.breach_minutes ?? device.breach_minutes, device.id),
+    ];
+    // Đổi ngưỡng: nhiệt độ hiện tại có thể đang "ngoài" khoảng mới. Đặt lại trạng thái (hủy báo động
+    // cũ không gửi "đã ổn", chờ tủ đạt ngưỡng mới) để không báo động dồn dập oan.
+    if (min_c !== device.min_c || max_c !== device.max_c) stmts.push(resetStateStmt(c.env.DB, device.id));
+    await c.env.DB.batch(stmts);
     return c.json({ ok: true });
   });
 
@@ -275,8 +339,8 @@ export function createApp(deps: Deps) {
     if (!device) return c.json({ error: 'not_found' }, 404);
     await c.env.DB.batch([
       c.env.DB.prepare('DELETE FROM recipients WHERE device_id = ?').bind(device.id),
-      c.env.DB.prepare('UPDATE devices SET account_id = NULL WHERE id = ?').bind(device.id),
-      c.env.DB.prepare("UPDATE alert_state SET phase = 'ok', breach_kind = NULL, breach_since = NULL, in_range_since = NULL, last_notified_at = NULL, reminders_sent = 0 WHERE device_id = ?").bind(device.id),
+      c.env.DB.prepare('UPDATE devices SET account_id = NULL, claimed_at = NULL WHERE id = ?').bind(device.id),
+      resetStateStmt(c.env.DB, device.id),
     ]);
     return c.json({ ok: true });
   });

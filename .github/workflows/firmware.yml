@@ -1,0 +1,23 @@
+name: firmware
+on:
+  push:
+    paths: ['firmware/**', '.github/workflows/firmware.yml']
+  pull_request:
+    paths: ['firmware/**', '.github/workflows/firmware.yml']
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: firmware
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install platformio cryptography
+      # Test logic thuần trên máy (không cần chip).
+      - run: pio test -e native
+      # Biên dịch bản chip với cặp khóa OTA dùng một lần (khóa riêng không rời khỏi runner).
+      - run: bash tools/gen_ota_keys.sh
+      - run: pio run -e esp32c3

@@ -1,0 +1,29 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "auhono-server",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-01",
+  "compatibility_flags": ["nodejs_compat"],
+  // Chạy mỗi 5 phút: phát hiện thiết bị im lặng, nhắc lại cảnh báo, gửi lại tin lỗi.
+  "triggers": { "crons": ["*/5 * * * *"] },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "auhono",
+      // Thay bằng id thật sau khi chạy: wrangler d1 create auhono
+      "database_id": "00000000-0000-0000-0000-000000000000",
+      "migrations_dir": "migrations"
+    }
+  ],
+  "vars": {
+    // Origin của Zalo Mini App được phép gọi API (phân tách bằng dấu phẩy).
+    "ALLOWED_ORIGINS": "https://h5.zdn.vn,zbrowser://h5.zdn.vn",
+    // ZNS template id (đăng ký trên Zalo, xem docs/zns-templates.md). Để trống = chỉ ghi log.
+    "ZNS_TEMPLATE_ALERT": "",
+    "ZNS_TEMPLATE_OFFLINE": "",
+    "ZNS_TEMPLATE_RECOVERED": ""
+  }
+  // Secrets (đặt bằng `wrangler secret put`, KHÔNG ghi vào file này):
+  //   MASTER_SECRET       - sinh khóa từng thiết bị + mã kích hoạt
+  //   ZALO_APP_ID, ZALO_APP_SECRET, ZALO_OA_REFRESH_TOKEN (khởi tạo lần đầu)
+}

@@ -1,0 +1,11 @@
+node_modules
+# Kết quả build của zmp/vite
+www
+dist
+# .env chứa APP_ID/ZMP_TOKEN của zmp-cli và cấu hình riêng: không commit (chỉ commit .env.example)
+.env
+.env.*
+!.env.example
+*.local
+coverage
+.DS_Store

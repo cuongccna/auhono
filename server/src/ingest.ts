@@ -22,6 +22,8 @@ export async function ingest(
   input: Reading[],
   now: number,
   firmware?: string,
+  /** Chẩn đoán đã kiểm tra hợp lệ của thiết bị (JSON), lưu để hỗ trợ từ xa. */
+  diagJson?: string,
 ): Promise<IngestResult> {
   // Sắp theo thời gian; loại số đo ngoài cửa sổ hợp lệ và trùng ts trong cùng gói.
   const seen = new Set<number>();
@@ -37,10 +39,16 @@ export async function ingest(
     ...readings.map((r) =>
       db.prepare('INSERT OR IGNORE INTO readings (device_id, ts, temp_c) VALUES (?, ?, ?)').bind(device.id, r.ts, r.c),
     ),
-    // last_seen = giờ NHẬN (không phải ts số đo): phát hiện im lặng dựa trên lúc gói tới.
+    // last_seen = giờ NHẬN gói (kể cả nhịp tim không có số đo): phát hiện mất liên lạc dựa trên lúc gói tới.
+    // last_reading_at chỉ đổi khi có số đo hợp lệ: khác biệt giữa hai mốc này = lỗi cảm biến.
     db
-      .prepare('UPDATE devices SET last_seen = ?, firmware = COALESCE(?, firmware) WHERE id = ?')
-      .bind(now, firmware ?? null, device.id),
+      .prepare(
+        `UPDATE devices SET last_seen = ?1, firmware = COALESCE(?2, firmware),
+           last_reading_at = CASE WHEN ?3 > 0 THEN ?1 ELSE last_reading_at END,
+           diag_json = COALESCE(?4, diag_json), diag_at = CASE WHEN ?4 IS NULL THEN diag_at ELSE ?1 END
+         WHERE id = ?5`,
+      )
+      .bind(now, firmware ?? null, readings.length, diagJson ?? null, device.id),
   ];
 
   let events: AlertEvent[] = [];

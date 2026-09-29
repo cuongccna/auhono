@@ -5,6 +5,7 @@ import { z } from 'zod';
 import {
   canonicalString,
   deriveActivationCode,
+  deriveApCredentials,
   deriveDeviceKey,
   timingSafeEqualStr,
   verifyCanonical,
@@ -134,10 +135,18 @@ export function createApp(deps: Deps) {
 
   const readingsSchema = z.object({
     fw: z.string().max(32).optional(),
-    readings: z
-      .array(z.object({ t: z.number().int(), c: z.number().min(-60).max(125) }))
-      .min(1)
-      .max(20),
+    // Rỗng = gói nhịp tim (đầu dò hỏng nhưng thiết bị còn sống): xem docs/PROTOCOL.md.
+    readings: z.array(z.object({ t: z.number().int(), c: z.number().min(-60).max(125) })).max(20),
+    // Kiểm tra riêng và khoan dung: diag sai định dạng KHÔNG được làm mất số đo.
+    diag: z.unknown().optional(),
+  });
+  const diagSchema = z.object({
+    sensor: z.enum(['ok', 'fault']).optional(),
+    fault_s: z.number().int().min(0).max(2147483647).optional(),
+    rst: z.string().regex(/^[A-Za-z0-9_]{1,16}$/).optional(),
+    rssi: z.number().int().min(-120).max(0).optional(),
+    heap: z.number().int().min(0).max(1_000_000_000).optional(),
+    up: z.number().int().min(0).max(2147483647).optional(),
   });
 
   app.post('/v1/readings', deviceAuth, async (c) => {
@@ -152,12 +161,15 @@ export function createApp(deps: Deps) {
 
     const device = c.get('device');
     const now = deps.now();
+    const diag = diagSchema.safeParse(parsed.data.diag);
+    const diagJson = diag.success && Object.keys(diag.data).length > 0 ? JSON.stringify(diag.data) : undefined;
     const result = await ingest(
       c.env.DB,
       device,
       parsed.data.readings.map((r) => ({ ts: r.t, c: r.c })),
       now,
       parsed.data.fw,
+      diagJson,
     );
     // Có cảnh báo mới thì gửi ngay, không đợi cron 5 phút.
     if (result.events.length > 0) {
@@ -276,6 +288,16 @@ export function createApp(deps: Deps) {
     return c.json({ ok: true, device_id, already_owned: mine });
   });
 
+  /** Chẩn đoán đã lưu (đã kiểm tra lúc ghi); lỗi parse thì bỏ qua. */
+  const parseDiag = (json: string | null): Record<string, unknown> | null => {
+    if (!json) return null;
+    try {
+      return JSON.parse(json) as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+  };
+
   type ListRow = DeviceRow & {
     phase: string | null;
     armed: number | null;
@@ -296,6 +318,10 @@ export function createApp(deps: Deps) {
     max_c: d.max_c,
     breach_minutes: d.breach_minutes,
     last_seen: d.last_seen,
+    // Số đo hợp lệ gần nhất; chênh với last_seen cho biết thiết bị còn sống nhưng đầu dò hỏng.
+    last_reading_at: d.last_reading_at,
+    diag: parseDiag(d.diag_json),
+    diag_at: d.diag_at,
     claimed_at: d.claimed_at,
     firmware: d.firmware,
     phase: d.phase ?? 'ok',
@@ -436,6 +462,14 @@ export function createApp(deps: Deps) {
       resetStateStmt(c.env.DB, device.id),
     ]);
     return c.json({ ok: true });
+  });
+
+  // Thông tin Wi-Fi cấu hình của thiết bị (mật khẩu WPA2 suy từ khóa): chủ quán mất tem vẫn xem lại được.
+  app.get('/v1/devices/:id/setup', ownerAuth, async (c) => {
+    const device = await ownedDevice(c);
+    if (!device) return c.json({ error: 'not_found' }, 404);
+    const ap = await deriveApCredentials(c.env.MASTER_SECRET, device.id);
+    return c.json({ ap_ssid: ap.ssid, ap_password: ap.password, wifi_qr: ap.qr });
   });
 
   // Biểu đồ: gộp theo 5 phút (tối đa ~2000 điểm cho 7 ngày).

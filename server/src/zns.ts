@@ -23,9 +23,12 @@ export function templateFor(env: Env, kind: NotificationMessage['kind']): string
       return env.ZNS_TEMPLATE_ALERT;
     case 'offline':
     case 'offline_reminder':
+    case 'sensor_fault':
+    case 'sensor_fault_reminder':
       return env.ZNS_TEMPLATE_OFFLINE;
     case 'recovered':
     case 'reconnected':
+    case 'sensor_recovered':
       return env.ZNS_TEMPLATE_RECOVERED;
   }
 }

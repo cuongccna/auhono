@@ -25,6 +25,12 @@ export function telegramText(m: NotificationMessage): string {
       return `⚠️ ${m.deviceName} không gửi được dữ liệu (tính đến ${time}). Có thể mất điện, mất Wi-Fi hoặc đứt dây đầu dò. Hãy kiểm tra.`;
     case 'offline_reminder':
       return `⚠️ Nhắc lại: ${m.deviceName} vẫn không gửi được dữ liệu. Có thể mất điện, mất Wi-Fi hoặc đứt dây đầu dò.`;
+    case 'sensor_fault':
+      return `🔌 ${m.deviceName} vẫn kết nối nhưng không đọc được nhiệt độ từ ${time}. Có thể dây đầu dò bị đứt hoặc rút ra. Hãy kiểm tra.`;
+    case 'sensor_fault_reminder':
+      return `🔌 Nhắc lại: ${m.deviceName} vẫn không đọc được nhiệt độ. Hãy kiểm tra dây đầu dò.`;
+    case 'sensor_recovered':
+      return `✅ ${m.deviceName} đọc được nhiệt độ trở lại lúc ${time}${temp}.`;
     case 'recovered':
       return `✅ ${m.deviceName} đã trở lại bình thường lúc ${time}${temp}.`;
     case 'reconnected':

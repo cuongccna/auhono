@@ -42,6 +42,22 @@ export function deriveDeviceKey(masterSecret: string, deviceId: string): Promise
 // Bảng chữ cái Crockford base32 (bỏ I, L, O, U) để in lên hộp khó nhầm.
 const ALPHABET = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
 
+/**
+ * Wi-Fi cấu hình của thiết bị (AP WPA2). Thiết bị tự suy ra từ khóa của nó bằng cùng công thức
+ * (docs/PROTOCOL.md), nên lúc ráp không cần nạp thêm gì. Máy chủ suy lại để chủ quán xem khi mất tem.
+ */
+export async function deriveApCredentials(
+  masterSecret: string,
+  deviceId: string,
+): Promise<{ ssid: string; password: string; qr: string }> {
+  const key = await deriveDeviceKey(masterSecret, deviceId);
+  const h = await hmac(key, 'ap-password:v1');
+  let password = '';
+  for (let i = 0; i < 10; i++) password += ALPHABET[h[i]! % 32];
+  const ssid = `Auhono-${deviceId.slice(-4)}`;
+  return { ssid, password, qr: `WIFI:T:WPA;S:${ssid};P:${password};H:false;;` };
+}
+
 /** Mã kích hoạt 10 ký tự (50 bit) in trong mã QR trên hộp. */
 export async function deriveActivationCode(masterSecret: string, deviceId: string): Promise<string> {
   const h = await hmac(masterSecret, `activation:${deviceId}`);

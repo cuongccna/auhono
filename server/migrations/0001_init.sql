@@ -21,7 +21,10 @@ CREATE TABLE devices (
   max_c          REAL NOT NULL DEFAULT -18,              -- ngưỡng trên (°C)
   breach_minutes INTEGER NOT NULL DEFAULT 15,            -- vượt ngưỡng liên tục bao lâu mới báo
   last_seq       INTEGER NOT NULL DEFAULT 0,             -- chống phát lại gói cũ
-  last_seen      INTEGER,                                -- lần cuối nhận số đo hợp lệ
+  last_seen      INTEGER,                                -- lần cuối nhận gói hợp lệ (kể cả nhịp tim không có số đo)
+  last_reading_at INTEGER,                               -- lần cuối nhận số đo hợp lệ (phát hiện lỗi cảm biến)
+  diag_json      TEXT,                                   -- chẩn đoán mới nhất từ thiết bị (rssi, lý do khởi động lại...)
+  diag_at        INTEGER,
   firmware       TEXT,
   revoked        INTEGER NOT NULL DEFAULT 0,
   created_at     INTEGER NOT NULL
@@ -70,7 +73,7 @@ CREATE TABLE readings_hourly (
 -- Trạng thái máy trạng thái cảnh báo của từng thiết bị (xem src/alerts.ts).
 CREATE TABLE alert_state (
   device_id        TEXT PRIMARY KEY REFERENCES devices(id) ON DELETE CASCADE,
-  phase            TEXT NOT NULL DEFAULT 'ok' CHECK (phase IN ('ok', 'temp_alarm', 'offline')),
+  phase            TEXT NOT NULL DEFAULT 'ok' CHECK (phase IN ('ok', 'temp_alarm', 'offline', 'sensor_fault')),
   breach_kind      TEXT CHECK (breach_kind IN ('high', 'low')),
   breach_since     INTEGER,   -- ts của số đo đầu tiên trong chuỗi vượt ngưỡng liên tục
   in_range_since   INTEGER,   -- đang báo động mà số đo đã về bình thường từ lúc nào
@@ -88,7 +91,7 @@ CREATE TABLE alert_events (
   id        INTEGER PRIMARY KEY AUTOINCREMENT,
   token     TEXT NOT NULL UNIQUE,   -- định danh ngẫu nhiên: gắn tin nhắn đúng sự kiện, không phụ thuộc last_insert_rowid()
   device_id TEXT NOT NULL,
-  kind      TEXT NOT NULL,   -- temp_alarm | temp_reminder | offline | offline_reminder | recovered | reconnected
+  kind      TEXT NOT NULL,   -- temp_alarm | temp_reminder | offline | offline_reminder | sensor_fault | sensor_fault_reminder | recovered | reconnected | sensor_recovered
   ts        INTEGER NOT NULL,
   temp_c    REAL,
   detail    TEXT

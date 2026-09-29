@@ -53,7 +53,8 @@ Chưa cấu hình ZNS thì cảnh báo chỉ được ghi log (`LogNotifier`), h
 | Nghỉ Tết / chuyển tủ / rút điện có chủ ý | Nút "Tạm dừng" (`POST /v1/devices/:id/pause`, 1–60 ngày): không tốn tin nhắn, tự bật lại khi hết hạn |
 | Bão báo động (dao động ngưỡng, lỗi bất thường) | Trần 20 tin/thiết bị/24 giờ (`DAILY_MESSAGE_CAP`); vượt trần thì tin bị `suppressed` (vẫn ghi sự kiện) |
 | Nhiệt độ về bình thường thoáng qua | Chỉ báo "đã ổn" khi bình thường liên tục 5 phút |
-| Mất điện / mất Wi-Fi / đứt dây đầu dò | Im lặng > 15 phút thì báo "mất kết nối"; nhắc lại +2 giờ, +6 giờ, +12 giờ; có số đo lại thì báo "đã kết nối lại" |
+| Đứt/rút dây đầu dò (gioăng cửa cắt dây) | Thiết bị vẫn gửi **nhịp tim** (`readings: []` + `diag`) nên máy chủ biết "còn sống nhưng không đọc được nhiệt độ": sau 15 phút báo **lỗi cảm biến** (nhắc +2/+6/+12 giờ); có số đo lại thì báo "đọc được trở lại". Thiết bị cũ không gửi nhịp tim vẫn rơi vào "mất kết nối" |
+| Mất điện / mất Wi-Fi | Im lặng > 15 phút thì báo "mất kết nối"; nhắc lại +2 giờ, +6 giờ, +12 giờ; có số đo lại thì báo "đã kết nối lại" |
 | Thiết bị mới lắp nhưng chưa từng kết nối (Wi-Fi 5 GHz, sai mật khẩu) | Sau 60 phút kể từ lúc gắn chủ thì báo |
 | Trang chi tiết thiết bị | `GET /v1/devices/:id` trả trạng thái kèm `alarm_since`, `last_notified_at`, `armed`, `paused_until`, `acked_until` |
 | Chưa có người nhận cảnh báo | `GET /v1/devices` trả `recipient_count: 0` để app cảnh báo chủ quán |
@@ -126,3 +127,10 @@ npx wrangler d1 execute auhono --remote --command "SELECT phone, last_error, upd
 - **SMS** làm kênh dự phòng thứ ba (thường đắt hơn ZNS): hiện có hàng đợi thử lại, `notify_failures_24h` và Telegram.
 - **Khóa riêng từng thiết bị xoay được**: khóa suy từ `MASTER_SECRET` + id nên thu hồi = cấp id mới.
 - **Ngưỡng theo mùa/tủ khác nhau** (xả đá định kỳ có lịch): hiện dùng ngưỡng cố định + thời gian vượt liên tục.
+
+## Wi-Fi cấu hình của thiết bị (WPA2)
+
+Cổng cấu hình của thiết bị không còn là Wi-Fi mở: mật khẩu WPA2 suy từ khóa thiết bị (công thức và vector trong
+`docs/PROTOCOL.md`). `npm run provision` in thêm 3 cột vào `devices.csv`: `ap_ssid`, `ap_password`, `wifi_qr_payload`. Dán **hai mã QR**
+lên hộp: mã kích hoạt (Mini App quét) và mã Wi-Fi (camera điện thoại quét là tự vào Wi-Fi thiết bị). Chủ quán mất tem xem lại được
+mật khẩu qua `GET /v1/devices/:id/setup` (chỉ chủ thiết bị). Lộ `MASTER_SECRET` cũng lộ mật khẩu này (cùng gốc với khóa thiết bị).

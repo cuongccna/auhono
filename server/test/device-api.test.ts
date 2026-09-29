@@ -110,7 +110,7 @@ describe('POST /v1/readings — xác thực', () => {
 
 describe('POST /v1/readings — kiểm tra dữ liệu', () => {
   it.each([
-    ['rỗng', { readings: [] }],
+    ['thiếu trường readings', { fw: '1.0.0' }],
     ['nhiệt độ vô lý', { readings: [{ t: NOW, c: 999 }] }],
     ['DS18B20 lỗi -127', { readings: [{ t: NOW, c: -127 }] }],
     ['sai kiểu', { readings: [{ t: 'x', c: 1 }] }],

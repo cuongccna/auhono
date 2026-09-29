@@ -189,7 +189,7 @@ describe('nhắc lại có số đo mới nhất', () => {
     await h.settle();
     expect((await getState(testEnv.DB, id)).state.phase).toBe('temp_alarm');
     const at = h.clock.now + 30 * 60; // 30 phút sau báo động
-    await testEnv.DB.prepare('UPDATE devices SET last_seen = ? WHERE id = ?').bind(at, id).run(); // thiết bị vẫn đang gửi
+    await testEnv.DB.prepare('UPDATE devices SET last_seen = ?1, last_reading_at = ?1 WHERE id = ?2').bind(at, id).run(); // thiết bị vẫn đang gửi
     await checkDevices(testEnv.DB, at);
     const r = await one("SELECT temp_c, detail FROM alert_events WHERE device_id = ? AND kind = 'temp_reminder'", id);
     expect(r).toEqual({ temp_c: -9, detail: 'high' });
@@ -291,10 +291,10 @@ describe('kiểm soát chi phí tin nhắn', () => {
     const list = await json(await h.owner('owner-a-token', 'GET', '/v1/devices'));
     expect(list.devices.find((d: any) => d.id === id).acked_until).toBe(until);
 
-    await testEnv.DB.prepare('UPDATE devices SET last_seen = ? WHERE id = ?').bind(until - 1, id).run();
+    await testEnv.DB.prepare('UPDATE devices SET last_seen = ?1, last_reading_at = ?1 WHERE id = ?2').bind(until - 1, id).run();
     await checkDevices(testEnv.DB, until - 1); // đang trong thời gian "đã biết"
     expect(await n("SELECT COUNT(*) n FROM alert_events WHERE device_id = ? AND kind = 'temp_reminder'", id)).toBe(0);
-    await testEnv.DB.prepare('UPDATE devices SET last_seen = ? WHERE id = ?').bind(until + 1, id).run();
+    await testEnv.DB.prepare('UPDATE devices SET last_seen = ?1, last_reading_at = ?1 WHERE id = ?2').bind(until + 1, id).run();
     await checkDevices(testEnv.DB, until + 1);
     expect(await n("SELECT COUNT(*) n FROM alert_events WHERE device_id = ? AND kind = 'temp_reminder'", id)).toBe(1);
 

@@ -82,7 +82,7 @@ function saveStateStmt(db: D1Database, deviceId: string, s: AlertState, expected
 }
 
 /** Nhắc lại qua ZNS chỉ gửi cho người nhận chính (đăng ký đầu tiên): tiết kiệm tiền tin, tránh làm phiền cả nhà. */
-const REMINDER_KINDS = new Set(['temp_reminder', 'offline_reminder']);
+const REMINDER_KINDS = new Set(['temp_reminder', 'offline_reminder', 'sensor_fault_reminder']);
 
 /** Các lý do không gửi. `zns`: tạm dừng hoặc vượt trần chi phí. `telegram` (miễn phí): chỉ khi tạm dừng. */
 export interface Suppress {

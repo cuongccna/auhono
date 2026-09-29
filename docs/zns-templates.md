@@ -12,6 +12,8 @@ Tham số dùng chung: `device_name` (tên tủ), `temperature` (vd. `-9.5°C`),
 | `ZNS_TEMPLATE_OFFLINE`   | Không nhận được số đo > 15 phút (nhắc +2 giờ, +6 giờ, +12 giờ), hoặc thiết bị mới gắn > 60 phút chưa kết nối | "{device_name} không gửi được dữ liệu (tính đến {time}). Có thể mất điện, mất Wi-Fi hoặc đứt dây đầu dò. Hãy kiểm tra." |
 | `ZNS_TEMPLATE_RECOVERED` | Nhiệt độ về bình thường / thiết bị kết nối lại                               | "{device_name} đã trở lại bình thường lúc {time} ({temperature})."                                     |
 
+Mẫu OFFLINE cũng được dùng cho **lỗi cảm biến** (thiết bị còn kết nối nhưng không đọc được nhiệt độ, nhắc +2/+6/+12 giờ) và mẫu RECOVERED cho "đọc được nhiệt độ trở lại".
+
 Lời lẽ mẫu OFFLINE cố ý trung tính vì máy chủ không phân biệt được các nguyên nhân: mất điện, mất Wi-Fi, ISP
 hỏng, **dây đầu dò bị gioăng cửa cắt** (rất hay gặp; chip không có số đo hợp lệ thì không gửi gì), hay thiết bị mới
 lắp chưa từng kết nối (Wi-Fi 5 GHz, sai mật khẩu).

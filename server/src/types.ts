@@ -29,6 +29,9 @@ export interface DeviceRow {
   breach_minutes: number;
   last_seq: number;
   last_seen: number | null;
+  last_reading_at: number | null;
+  diag_json: string | null;
+  diag_at: number | null;
   firmware: string | null;
   revoked: number;
   created_at: number;

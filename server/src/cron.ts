@@ -44,7 +44,7 @@ export async function checkDevices(db: D1Database, now: number): Promise<number>
       // lặng sẽ bị báo "mất kết nối" ngay ở lượt cron kế tiếp.
       if (d.paused_until !== null && now < d.paused_until) continue;
       const before = stateFromRow(d);
-      const res = tick(before.state, now, d.last_seen, alertConfigFor(d), d.claimed_at);
+      const res = tick(before.state, now, d.last_seen, alertConfigFor(d), d.claimed_at, d.last_reading_at);
       if (JSON.stringify(res.state) === JSON.stringify(before.state)) continue;
       // Nhắc lại nhiệt độ: kèm số đo mới nhất để tin nhắn có nội dung.
       const evs: AlertEvent[] = res.events.map((e) =>

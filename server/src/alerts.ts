@@ -12,7 +12,7 @@
 //  - Mất kết nối: không có số đo hợp lệ quá offlineSeconds; thiết bị đã gắn chủ mà chưa từng gửi
 //    số đo sau neverSeenSeconds cũng báo (Wi-Fi 5 GHz, nhập sai mật khẩu...).
 
-export type Phase = 'ok' | 'temp_alarm' | 'offline';
+export type Phase = 'ok' | 'temp_alarm' | 'offline' | 'sensor_fault';
 export type BreachKind = 'high' | 'low';
 
 export interface AlertState {
@@ -40,6 +40,8 @@ export interface AlertConfig {
   /** Như trên cho mất kết nối: thưa hơn vì mất điện thường không xử lý được ngay. */
   offlineReminderDelays: readonly number[];
   offlineSeconds: number;
+  /** Thiết bị còn liên lạc (gửi nhịp tim) nhưng không có số đo hợp lệ quá mức này => lỗi cảm biến. */
+  sensorFaultSeconds: number;
   /** Đã gắn chủ mà chưa từng có số đo: sau bao lâu thì báo. */
   neverSeenSeconds: number;
   /** Về trong ngưỡng ngắn hơn mức này không tính là "hết vượt ngưỡng". */
@@ -53,6 +55,9 @@ export type AlertEventKind =
   | 'temp_reminder'
   | 'offline'
   | 'offline_reminder'
+  | 'sensor_fault'
+  | 'sensor_fault_reminder'
+  | 'sensor_recovered'
   | 'recovered'
   | 'reconnected';
 
@@ -81,6 +86,7 @@ export const DEFAULTS = {
   // Mất kết nối: +2 giờ, +6 giờ, +12 giờ.
   offlineReminderDelays: [7200, 21600, 43200],
   offlineSeconds: 15 * 60,
+  sensorFaultSeconds: 15 * 60,
   neverSeenSeconds: 60 * 60,
   dipSeconds: 2 * 60,
   warmupMaxSeconds: 12 * 3600,
@@ -115,8 +121,9 @@ export function step(prev: AlertState, r: Reading, cfg: AlertConfig): StepResult
   const events: AlertEvent[] = [];
   const breach = breachOf(r.c, cfg);
 
-  if (s.phase === 'offline') {
-    // Có số đo trở lại => hết mất kết nối.
+  if (s.phase === 'offline' || s.phase === 'sensor_fault') {
+    // Có số đo trở lại => hết mất kết nối / hết lỗi cảm biến.
+    const kind = s.phase === 'sensor_fault' ? 'sensor_recovered' : 'reconnected';
     s.phase = 'ok';
     s.ackedUntil = null;
     s.lastNotifiedAt = null;
@@ -126,7 +133,7 @@ export function step(prev: AlertState, r: Reading, cfg: AlertConfig): StepResult
     s.inRangeSince = null;
     if (breach === null) {
       s.armed = true;
-      events.push({ kind: 'reconnected', ts: r.ts, tempC: r.c, detail: null });
+      events.push({ kind, ts: r.ts, tempC: r.c, detail: null });
       return { state: s, events };
     }
     // Trở lại nhưng nhiệt độ đang lệch: bắt đầu đếm thời gian vượt ngưỡng, không báo "ổn".
@@ -188,8 +195,11 @@ export function step(prev: AlertState, r: Reading, cfg: AlertConfig): StepResult
 }
 
 /**
- * Xử lý theo thời gian (cron 5 phút): phát hiện im lặng và nhắc lại.
- * `lastSeen` = giờ nhận số đo gần nhất (null nếu chưa từng gửi); `claimedAt` = giờ gắn chủ.
+ * Xử lý theo thời gian (cron 5 phút): phát hiện im lặng, lỗi cảm biến và nhắc lại.
+ * - `lastSeen`: giờ nhận GÓI hợp lệ gần nhất, kể cả gói nhịp tim không có số đo (null nếu chưa từng gửi).
+ * - `lastReadingAt`: giờ nhận số đo hợp lệ gần nhất (null nếu chưa từng có).
+ * - `claimedAt`: giờ gắn chủ.
+ * Mất liên lạc (mất điện/Wi-Fi) ưu tiên hơn lỗi cảm biến: thiết bị cũ không gửi nhịp tim sẽ luôn rơi vào "mất kết nối".
  */
 export function tick(
   prev: AlertState,
@@ -197,27 +207,48 @@ export function tick(
   lastSeen: number | null,
   cfg: AlertConfig,
   claimedAt: number | null = null,
+  lastReadingAt: number | null = null,
 ): StepResult {
   const s: AlertState = { ...prev };
   const events: AlertEvent[] = [];
   const silentSince = lastSeen ?? claimedAt;
   if (silentSince === null) return { state: s, events };
   const limit = lastSeen !== null ? cfg.offlineSeconds : cfg.neverSeenSeconds;
+  const contactLost = now - silentSince >= limit;
+  const neverSeen = lastSeen === null;
 
-  if (s.phase !== 'offline' && now - silentSince >= limit) {
-    s.phase = 'offline';
+  const enter = (phase: 'offline' | 'sensor_fault', detail: string | null) => {
+    s.phase = phase;
     s.ackedUntil = null;
     s.breachKind = null;
     s.breachSince = null;
     s.inRangeSince = null;
     s.lastNotifiedAt = now;
     s.remindersSent = 0;
-    events.push({ kind: 'offline', ts: now, tempC: null, detail: lastSeen === null ? 'never_seen' : null });
+    events.push({ kind: phase, ts: now, tempC: null, detail });
+  };
+
+  if (s.phase !== 'offline' && contactLost) {
+    enter('offline', neverSeen ? 'never_seen' : null);
+    return { state: s, events };
+  }
+
+  // Còn liên lạc (có nhịp tim) nhưng lâu không có số đo hợp lệ: đầu dò đứt/hỏng.
+  const readingSince = lastReadingAt ?? claimedAt;
+  if (
+    !contactLost &&
+    !neverSeen &&
+    s.phase !== 'sensor_fault' &&
+    readingSince !== null &&
+    now - readingSince >= cfg.sensorFaultSeconds
+  ) {
+    enter('sensor_fault', null);
     return { state: s, events };
   }
 
   // Lịch nhắc theo loại sự cố; chủ quán đã bấm "đã biết" thì im lặng tới mốc ackedUntil.
-  const schedule = s.phase === 'temp_alarm' ? cfg.reminderDelays : s.phase === 'offline' ? cfg.offlineReminderDelays : [];
+  const schedule =
+    s.phase === 'temp_alarm' ? cfg.reminderDelays : s.phase === 'offline' || s.phase === 'sensor_fault' ? cfg.offlineReminderDelays : [];
   const acked = s.ackedUntil !== null && now < s.ackedUntil;
   const delay = schedule[s.remindersSent];
   const due = !acked && delay !== undefined && s.lastNotifiedAt !== null && now - s.lastNotifiedAt >= delay;
@@ -230,7 +261,11 @@ export function tick(
   } else if (s.phase === 'offline') {
     s.lastNotifiedAt = now;
     s.remindersSent += 1;
-    events.push({ kind: 'offline_reminder', ts: now, tempC: null, detail: lastSeen === null ? 'never_seen' : null });
+    events.push({ kind: 'offline_reminder', ts: now, tempC: null, detail: neverSeen ? 'never_seen' : null });
+  } else if (s.phase === 'sensor_fault') {
+    s.lastNotifiedAt = now;
+    s.remindersSent += 1;
+    events.push({ kind: 'sensor_fault_reminder', ts: now, tempC: null, detail: null });
   }
   return { state: s, events };
 }

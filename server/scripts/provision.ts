@@ -4,10 +4,12 @@
 //
 // Ghi ra thư mục --out (mặc định ./out, đã .gitignore vì chứa KHÓA BÍ MẬT):
 //   devices.sql  - INSERT vào D1:  wrangler d1 execute auhono --remote --file out/devices.sql
-//   devices.csv  - id, khóa (hex, nạp vào chip), mã kích hoạt, nội dung mã QR dán lên hộp
+//   devices.csv  - id, khóa (hex, nạp vào chip), mã kích hoạt, nội dung mã QR kích hoạt (Mini App) dán lên hộp,
+//                  và Wi-Fi cấu hình của thiết bị: ap_ssid, ap_password, wifi_qr_payload (mã QR Wi-Fi: điện thoại quét
+//                  bằng camera là tự vào Wi-Fi thiết bị). Thiết bị tự suy mật khẩu từ khóa nên không cần nạp thêm.
 // MASTER_SECRET đọc từ biến môi trường (không nhận qua tham số để khỏi lọt vào lịch sử shell).
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { deriveActivationCode, deriveDeviceKey, toHex } from '../src/crypto.ts';
+import { deriveActivationCode, deriveApCredentials, deriveDeviceKey, toHex } from '../src/crypto.ts';
 
 function arg(name: string, fallback: string): string {
   const i = process.argv.indexOf(`--${name}`);
@@ -29,13 +31,14 @@ if (!Number.isInteger(start) || start < 1 || !Number.isInteger(count) || count <
 
 const now = Math.floor(Date.now() / 1000);
 const sql: string[] = [];
-const csv = ['device_id,device_key_hex,activation_code,qr_payload'];
+const csv = ['device_id,device_key_hex,activation_code,qr_payload,ap_ssid,ap_password,wifi_qr_payload'];
 for (let n = start; n < start + count; n++) {
   const id = `AUH-${String(n).padStart(6, '0')}`;
   const key = toHex(await deriveDeviceKey(master, id));
   const code = await deriveActivationCode(master, id);
   sql.push(`INSERT OR IGNORE INTO devices (id, created_at) VALUES ('${id}', ${now});`);
-  csv.push(`${id},${key},${code},auhono://claim?d=${id}&c=${code}`);
+  const ap = await deriveApCredentials(master, id);
+  csv.push(`${id},${key},${code},auhono://claim?d=${id}&c=${code},${ap.ssid},${ap.password},${ap.qr}`);
 }
 
 mkdirSync(out, { recursive: true });

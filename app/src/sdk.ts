@@ -23,14 +23,22 @@ export async function getToken(): Promise<string> {
 /**
  * Xin quyền dùng tài khoản Zalo (hộp thoại của Zalo). Ném AppError('auth_required') nếu người dùng từ chối
  * hoặc Zalo bản cũ không hỗ trợ. Sau khi thành công, gọi lại request là lấy được token.
+ * Kết quả của `authorize` KHÔNG quyết định: từ SDK 2.35 token lấy được không cần hộp thoại, còn nếu người dùng
+ * đã bật quyền trong Cài đặt thì `authorize` có thể báo lỗi dù token đã có. Chỉ việc có token hay không mới đúng/sai.
  */
 export async function requestAccess(): Promise<void> {
   try {
     await authorize({});
   } catch {
-    throw new AppError('auth_required');
+    /* xem chú thích ở trên */
   }
-  if (!(await getToken())) throw new AppError('auth_required');
+  let token = '';
+  try {
+    token = await getToken();
+  } catch {
+    token = '';
+  }
+  if (!token) throw new AppError('auth_required');
 }
 
 /** Mở màn hình cài đặt quyền của Mini App (khi người dùng đã từ chối trước đó nên hộp thoại không hiện lại). */

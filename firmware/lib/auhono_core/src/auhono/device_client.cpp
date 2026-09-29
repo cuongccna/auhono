@@ -6,9 +6,33 @@ namespace auhono {
 
 ServerReply DeviceClient::call(const std::string& method, const std::string& pathAndQuery,
                                const uint8_t* body, size_t bodyLen, bool requireOkField) {
+  return run(method, pathAndQuery, body, bodyLen, nullptr, requireOkField);
+}
+
+ServerReply DeviceClient::callBuilt(const std::string& method, const std::string& pathAndQuery,
+                                    IBodySource& source, bool requireOkField) {
+  return run(method, pathAndQuery, nullptr, 0, &source, requireOkField);
+}
+
+ServerReply DeviceClient::run(const std::string& method, const std::string& pathAndQuery,
+                              const uint8_t* fixedBody, size_t fixedLen, IBodySource* source,
+                              bool requireOkField) {
   ServerReply reply;
   for (int attempt = 0; attempt < kMaxAttempts; attempt++) {
     platform_.feedWatchdog();
+
+    const uint8_t* body = fixedBody;
+    size_t bodyLen = fixedLen;
+    if (source) {
+      // Dựng body theo đồng hồ HIỆN TẠI (có thể vừa được chỉnh ở vòng trước).
+      bodyLen = source->build(bodyBuf_, sizeof bodyBuf_);
+      if (bodyLen == 0) {
+        last_ = HttpResponse();
+        reply = ServerReply();  // Unknown, status 0: không gửi gì
+        return reply;
+      }
+      body = reinterpret_cast<const uint8_t*>(bodyBuf_);
+    }
 
     HttpRequest req;
     req.method = method;

@@ -1,0 +1,791 @@
+// @vitest-environment jsdom
+// Kịch bản thực tế ở mức màn hình (jsdom, zmp-sdk và fetch giả lập). KHÔNG phải chạy trong Zalo thật.
+import { cleanup, fireEvent, render, screen, waitFor, within, act } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+const sdk = vi.hoisted(() => ({
+  token: 'tok-0123456789',
+  requestAccess: vi.fn(async () => undefined),
+  openPermissions: vi.fn(async () => undefined),
+  scanQr: vi.fn(async () => ({ status: 'cancelled' }) as unknown),
+  askCameraPermission: vi.fn(async () => true),
+  dark: false,
+}));
+vi.mock('./sdk.ts', () => ({
+  getToken: async () => sdk.token,
+  requestAccess: (...a: unknown[]) => (sdk.requestAccess as (...x: unknown[]) => Promise<void>)(...a),
+  openPermissions: () => sdk.openPermissions(),
+  scanQr: () => sdk.scanQr(),
+  askCameraPermission: () => sdk.askCameraPermission(),
+  isZaloDarkTheme: () => sdk.dark,
+}));
+
+import Root from './components/app.tsx';
+import { ErrorBoundary } from './components/error-boundary.tsx';
+import { resetClock } from './lib/clock.ts';
+
+Element.prototype.scrollTo = () => undefined;
+
+type Call = { url: string; method: string; body: any };
+type Json = Record<string, unknown>;
+
+const ID = 'AUH-000001';
+let skew = 0; // giây: server - điện thoại
+const phoneNow = () => Math.floor(Date.now() / 1000);
+const serverNow = () => phoneNow() + skew;
+
+let devices: Json[];
+let recipients: Json[];
+let readings: () => Json;
+let calls: Call[];
+/** Ghi đè từng request (trả undefined = dùng xử lý mặc định). */
+let override: ((c: Call) => Response | undefined | Promise<Response | undefined>) | null;
+
+const jsonRes = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+
+function makeDevice(over: Json = {}): Json {
+  const t = serverNow();
+  return {
+    id: ID, name: 'Tủ kem', kind: 'freezer', min_c: -40, max_c: -18, breach_minutes: 15,
+    last_seen: t - 60, firmware: '1.0.0', phase: 'ok', latest: { ts: t - 60, temp_c: -20.5 },
+    armed: true, recipient_count: 2, notify_failures_24h: 0,
+    ...over,
+  };
+}
+const makeReadings = (temps: number[] = Array.from({ length: 12 }, () => -20)) => (): Json => {
+  const t = serverNow();
+  return { server_time: t, min_c: -40, max_c: -18, points: temps.map((c, i) => ({ t: t - 3600 + i * 300, avg: c, min: c - 0.5, max: c + 0.5 })) };
+};
+
+function defaultHandler(c: Call): Response {
+  if (c.url === '/v1/devices' && c.method === 'GET') return jsonRes({ server_time: serverNow(), devices });
+  if (c.url.startsWith(`/v1/devices/${ID}/readings`)) return jsonRes(readings());
+  if (c.url === `/v1/devices/${ID}/recipients` && c.method === 'GET') return jsonRes({ recipients });
+  if (c.url === `/v1/devices/${ID}/recipients` && c.method === 'POST') {
+    recipients.push({ id: recipients.length + 1, ...c.body });
+    return jsonRes({ id: recipients.length, ...c.body }, 201);
+  }
+  if (c.url.startsWith(`/v1/devices/${ID}/recipients/`) && c.method === 'DELETE') {
+    const rid = Number(c.url.split('/').pop());
+    recipients = recipients.filter((r) => r.id !== rid);
+    return jsonRes({ ok: true });
+  }
+  if (c.url === `/v1/devices/${ID}` && (c.method === 'PATCH' || c.method === 'DELETE')) return jsonRes({ ok: true });
+  if (c.url === '/v1/devices/claim') return jsonRes({ ok: true, device_id: c.body?.device_id });
+  return jsonRes({ error: 'not_found' }, 404);
+}
+
+beforeEach(() => {
+  resetClock();
+  skew = 0;
+  calls = [];
+  override = null;
+  devices = [makeDevice()];
+  recipients = [{ id: 1, name: 'Vợ', phone: '84912345678' }];
+  readings = makeReadings();
+  sdk.token = 'tok-0123456789';
+  sdk.requestAccess.mockClear();
+  sdk.scanQr.mockReset();
+  sdk.dark = false;
+  vi.stubGlobal('fetch', async (url: string, init: RequestInit) => {
+    const call: Call = { url: url.replace('https://api.auhono.invalid', ''), method: init.method ?? 'GET', body: init.body ? JSON.parse(init.body as string) : undefined };
+    calls.push(call);
+    return (await override?.(call)) ?? defaultHandler(call);
+  });
+});
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+  vi.useRealTimers();
+});
+
+function open(path: string) {
+  window.history.pushState({}, '', path);
+  return render(<Root />);
+}
+const t = (re: string | RegExp) => screen.findByText(re);
+const type = (label: string | RegExp, value: string) => fireEvent.change(screen.getByLabelText(label), { target: { value } });
+const click = (name: string | RegExp) => fireEvent.click(screen.getByRole('button', { name }));
+const callsTo = (method: string, url: string | RegExp) =>
+  calls.filter((c) => c.method === method && (typeof url === 'string' ? c.url === url : url.test(c.url)));
+
+// ───────────────────────────── Trạng thái & đồng hồ ─────────────────────────────
+
+describe('đồng hồ điện thoại lệch (dùng server_time)', () => {
+  it('điện thoại chạy NHANH 1 giờ: thiết bị vừa gửi số đo 1 phút trước vẫn hiện "Bình thường", không phải "Mất kết nối"', async () => {
+    skew = -3600; // server chậm hơn điện thoại 1 giờ
+    devices = [makeDevice()];
+    open('/');
+    expect(await t('Bình thường')).toBeTruthy();
+    expect(screen.queryByText('Mất kết nối')).toBeNull();
+    expect(screen.getByText(/Cập nhật 1 phút trước/)).toBeTruthy();
+  });
+
+  it('điện thoại chạy CHẬM 1 giờ: thiết bị im lặng 20 phút vẫn bị nhận ra là mất kết nối', async () => {
+    skew = 3600;
+    devices = [makeDevice({ last_seen: serverNow() - 20 * 60, latest: { ts: serverNow() - 20 * 60, temp_c: -20 } })];
+    open('/');
+    expect(await t('Mất kết nối')).toBeTruthy();
+    expect(screen.getByText(/Số đo cuối 20 phút trước/)).toBeTruthy();
+  });
+
+  it('server cũ không có server_time: vẫn chạy bằng giờ điện thoại', async () => {
+    override = (c) => (c.url === '/v1/devices' ? jsonRes({ devices }) : undefined);
+    open('/');
+    expect(await t('Bình thường')).toBeTruthy();
+  });
+});
+
+describe('trạng thái thiết bị', () => {
+  it('chưa có số đo: hướng dẫn cắm điện + Wi-Fi 2.4 GHz + cổng cấu hình Auhono-XXXX', async () => {
+    devices = [makeDevice({ latest: null, last_seen: null })];
+    open(`/device/${ID}`);
+    expect(await t(/Chưa có dữ liệu — cắm điện và kết nối Wi-Fi cho thiết bị/)).toBeTruthy();
+    expect(screen.getByText('2.4 GHz')).toBeTruthy();
+    expect(screen.getAllByText('Auhono-0001').length).toBeGreaterThan(0);
+    expect(screen.getByText('192.168.4.1')).toBeTruthy();
+    expect(screen.getByText(/Giữ nút trên thiết bị khoảng 5 giây|Không thấy mạng Auhono-0001/)).toBeTruthy();
+  });
+
+  it('mất kết nối: nói giờ nhận số đo cuối và các nguyên nhân (mất điện, Wi-Fi, đứt dây đầu dò)', async () => {
+    devices = [makeDevice({ last_seen: serverNow() - 3 * 3600, latest: { ts: serverNow() - 3 * 3600, temp_c: -19 }, phase: 'offline' })];
+    open(`/device/${ID}`);
+    expect(await t(/Lần cuối nhận số đo lúc/)).toBeTruthy();
+    expect(screen.getAllByText(/3 giờ trước/).length).toBeGreaterThan(0);
+    const banner = screen.getByText(/Lần cuối nhận số đo lúc/).closest('[role="alert"]')!;
+    expect(banner.textContent).toContain('mất điện');
+    expect(banner.textContent).toContain('dây đầu dò');
+    expect(banner.textContent).toContain('chưa chắc');
+  });
+
+  it('đang báo động: nói tủ nóng hơn mức cao nhất, nhiệt độ hiện tại và từ khoảng mấy giờ', async () => {
+    const t0 = serverNow();
+    devices = [makeDevice({ phase: 'temp_alarm', latest: { ts: t0 - 60, temp_c: -12 }, last_seen: t0 - 60 })];
+    readings = makeReadings([-20, -20, -19, -15, -14, -13, -12, -12, -12, -12, -12, -12]);
+    open(`/device/${ID}`);
+    expect(await t('Đang báo động')).toBeTruthy();
+    expect(screen.getAllByText('-12,0°C').length).toBeGreaterThan(0);
+    expect(await t(/Tủ đang nóng hơn mức cao nhất \(-18,0°C\), từ khoảng \d\d:\d\d/)).toBeTruthy();
+  });
+
+  it('armed = false: hiện "Đang chờ tủ đạt nhiệt độ, chưa cảnh báo"', async () => {
+    devices = [makeDevice({ armed: false })];
+    open(`/device/${ID}`);
+    expect(await t('Đang chờ tủ đạt nhiệt độ, chưa cảnh báo.')).toBeTruthy();
+  });
+
+  it('recipient_count = 0: cảnh báo nổi bật + nút dẫn tới màn hình người nhận', async () => {
+    devices = [makeDevice({ recipient_count: 0 })];
+    recipients = [];
+    open(`/device/${ID}`);
+    expect(await t('Chưa có người nhận cảnh báo — sẽ không có tin nhắn nào được gửi.')).toBeTruthy();
+    click('Thêm người nhận');
+    expect(await t('Thêm người nhận', )).toBeTruthy();
+    await waitFor(() => expect(callsTo('GET', `/v1/devices/${ID}/recipients`).length).toBe(1));
+  });
+
+  it('notify_failures_24h > 0: cảnh báo kiểm tra số điện thoại/Zalo', async () => {
+    devices = [makeDevice({ notify_failures_24h: 3 })];
+    open(`/device/${ID}`);
+    expect(await t('Không gửi được tin cho một số người nhận, hãy kiểm tra số điện thoại/Zalo.')).toBeTruthy();
+    expect(screen.getByText(/đã chặn tài khoản Auhono/)).toBeTruthy();
+  });
+
+  it('màn hình chính cũng nhắc chưa có người nhận', async () => {
+    devices = [makeDevice({ recipient_count: 0 })];
+    open('/');
+    expect(await t(/Chưa có người nhận cảnh báo/)).toBeTruthy();
+  });
+
+  it('có giải thích độ trễ 15 phút và ý nghĩa "mất kết nối" trong phần trợ giúp', async () => {
+    open(`/device/${ID}`);
+    fireEvent.click(await t('Cảnh báo hoạt động thế nào?'));
+    expect(screen.getByText(/chỉ báo khi tủ nóng hoặc lạnh quá ngưỡng/)).toBeTruthy();
+    expect(screen.getByText(/không gửi số đo nào trong 15 phút/)).toBeTruthy();
+  });
+});
+
+// ───────────────────────────── Mạng, lỗi, dữ liệu cũ ─────────────────────────────
+
+describe('stale-while-error', () => {
+  it('làm mới thất bại: vẫn hiện số liệu cũ + "Đang hiện số liệu lúc …" + nút Thử lại', async () => {
+    open('/');
+    expect(await t('Tủ kem')).toBeTruthy();
+    override = () => { throw new TypeError('Failed to fetch'); };
+    click('Làm mới');
+    expect(await t(/Không kết nối được mạng/)).toBeTruthy();
+    expect(screen.getByText(/Đang hiện số liệu lúc \d\d:\d\d/)).toBeTruthy();
+    expect(screen.getByText('Tủ kem')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Thử lại' })).toBeTruthy();
+    // Bấm thử lại khi mạng có lại
+    override = null;
+    click('Thử lại');
+    await waitFor(() => expect(screen.queryByText(/Không kết nối được mạng/)).toBeNull());
+  });
+
+  it('điện thoại mất mạng lâu: KHÔNG kết luận thiết bị "Mất kết nối" chỉ vì số liệu cũ đi', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    devices = [makeDevice({ last_seen: serverNow() - 14 * 60, latest: { ts: serverNow() - 14 * 60, temp_c: -20 } })];
+    open('/');
+    expect(await t('Bình thường')).toBeTruthy();
+    vi.setSystemTime(Date.now() + 10 * 60_000); // 10 phút trôi qua, điện thoại mất mạng
+    override = () => { throw new TypeError('Failed to fetch'); };
+    click('Làm mới');
+    expect(await t(/Không kết nối được mạng/)).toBeTruthy();
+    expect(screen.getByText('Bình thường')).toBeTruthy(); // tình trạng tính theo LÚC TẢI CUỐI
+    expect(screen.queryByText('Mất kết nối')).toBeNull();
+    expect(screen.getByText(/Tình trạng thật của tủ có thể đã khác/)).toBeTruthy();
+  });
+
+  it('biểu đồ lỗi riêng: vẫn thấy trạng thái thiết bị, có nút thử lại cho biểu đồ', async () => {
+    override = (c) => (c.url.includes('/readings') ? jsonRes({ error: 'internal' }, 500) : undefined);
+    open(`/device/${ID}`);
+    expect(await t('Bình thường')).toBeTruthy();
+    expect(await t(/Hệ thống đang gặp sự cố/)).toBeTruthy();
+    expect(document.querySelector('svg.auh-chart')).toBeNull();
+  });
+});
+
+describe('lỗi server / xác thực', () => {
+  it('503 auth_unavailable (Zalo bận): "thử lại sau ít phút", có Thử lại, KHÔNG có nút Cho phép, giữ dữ liệu cũ', async () => {
+    open('/');
+    expect(await t('Tủ kem')).toBeTruthy();
+    override = () => jsonRes({ error: 'auth_unavailable' }, 503);
+    click('Làm mới');
+    expect(await t(/Zalo đang bận/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Thử lại' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /Cho phép/ })).toBeNull();
+    expect(screen.getByText('Tủ kem')).toBeTruthy();
+    expect(sdk.requestAccess).not.toHaveBeenCalled();
+  });
+
+  it('401: hiện nút Cho phép; bấm xong tự tải lại', async () => {
+    let unauthorized = true;
+    override = () => (unauthorized ? jsonRes({ error: 'unauthorized' }, 401) : undefined);
+    sdk.requestAccess.mockImplementation(async () => { unauthorized = false; });
+    open('/');
+    click(await screen.findByRole('button', { name: 'Cho phép' }).then((b) => b.textContent as string));
+    expect(await t('Tủ kem')).toBeTruthy();
+    expect(sdk.requestAccess).toHaveBeenCalledTimes(1);
+  });
+
+  it('người dùng từ chối quyền: hướng dẫn mở cài đặt, không mất dữ liệu đang gõ', async () => {
+    let unauthorized = true;
+    override = (c) => (c.method === 'PATCH' && unauthorized ? jsonRes({ error: 'unauthorized' }, 401) : undefined);
+    sdk.requestAccess.mockImplementationOnce(async () => { throw new Error('denied'); });
+    open(`/device/${ID}/rename`);
+    await screen.findByDisplayValue('Tủ kem');
+    type('Tên tủ', 'Tủ hải sản');
+    click('Lưu');
+    click(await screen.findByRole('button', { name: 'Cho phép' }).then((b) => b.textContent as string));
+    expect(await t(/Bạn chưa cho phép/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Mở cài đặt quyền' })).toBeTruthy();
+    expect((screen.getByLabelText('Tên tủ') as HTMLInputElement).value).toBe('Tủ hải sản'); // chữ đã gõ còn nguyên
+    // Sau đó bật quyền trong Cài đặt: bấm Cho phép lần nữa thành công, lỗi biến mất, chữ vẫn còn
+    unauthorized = false;
+    click('Cho phép');
+    await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
+    expect((screen.getByLabelText('Tên tủ') as HTMLInputElement).value).toBe('Tủ hải sản');
+  });
+
+  it('token rỗng (xem thử trên trình duyệt): báo cần cho phép, không gọi mạng', async () => {
+    sdk.token = '';
+    open('/');
+    expect(await t(/Ứng dụng cần được phép dùng tài khoản Zalo/)).toBeTruthy();
+    expect(calls).toHaveLength(0);
+  });
+
+  it('phản hồi HTML (portal Wi-Fi) => thông báo dễ hiểu, không lỗi trắng', async () => {
+    override = () => new Response('<html>Please sign in</html>', { status: 200 });
+    open('/');
+    expect(await t(/Wi-Fi đang đòi đăng nhập/)).toBeTruthy();
+  });
+
+  it('điện thoại mất mạng (navigator.onLine = false): có banner báo', async () => {
+    Object.defineProperty(navigator, 'onLine', { configurable: true, get: () => false });
+    try {
+      open('/');
+      expect(await t(/Điện thoại đang không có mạng/)).toBeTruthy();
+    } finally {
+      Object.defineProperty(navigator, 'onLine', { configurable: true, get: () => true });
+    }
+  });
+});
+
+// ───────────────────────────── Kích hoạt ─────────────────────────────
+
+describe('kích hoạt', () => {
+  const fill = (id = ID, code = 'ABCDE-FGHJK') => {
+    type('Mã thiết bị', id);
+    type('Mã kích hoạt', code);
+  };
+
+  it('bấm đúp nút Kích hoạt chỉ gửi MỘT request', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    override = async (c) => {
+      if (c.url === '/v1/devices/claim') await gate;
+      return undefined;
+    };
+    open('/activate');
+    fill();
+    const btn = screen.getByRole('button', { name: 'Kích hoạt' });
+    fireEvent.click(btn);
+    fireEvent.click(btn);
+    fireEvent.click(btn);
+    release();
+    await t('Thêm người nhận');
+    expect(callsTo('POST', '/v1/devices/claim')).toHaveLength(1);
+  });
+
+  it('server đã kích hoạt nhưng MẤT PHẢN HỒI: app kiểm tra danh sách và coi là thành công', async () => {
+    override = (c) => {
+      if (c.url === '/v1/devices/claim') throw new TypeError('Failed to fetch'); // mạng đứt sau khi server xử lý
+      return undefined;
+    };
+    open('/activate');
+    fill();
+    click('Kích hoạt');
+    expect(await t('Thêm người nhận')).toBeTruthy(); // sang màn hình người nhận
+    expect(callsTo('POST', '/v1/devices/claim')).toHaveLength(1);
+    expect(callsTo('GET', '/v1/devices').length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('mất mạng thật (thiết bị chưa có trong danh sách): báo lỗi và bấm lại được', async () => {
+    devices = [];
+    let down = true;
+    override = (c) => {
+      if (down) throw new TypeError('Failed to fetch');
+      return undefined;
+    };
+    open('/activate');
+    fill();
+    click('Kích hoạt');
+    expect(await t(/Không kết nối được mạng/)).toBeTruthy();
+    down = false;
+    click('Kích hoạt');
+    expect(await t('Thêm người nhận')).toBeTruthy();
+  });
+
+  it('mã sai / thiết bị của người khác: câu chung, không lộ thông tin, không kèm mã thiết bị', async () => {
+    override = (c) => (c.url === '/v1/devices/claim' ? jsonRes({ error: 'invalid_code' }, 404) : undefined);
+    open('/activate');
+    fill();
+    click('Kích hoạt');
+    const box = await screen.findByRole('alert');
+    expect(box.textContent).toContain('Mã không đúng, hoặc thiết bị này đang thuộc tài khoản khác');
+    expect(box.textContent).toContain('Gỡ thiết bị');
+    expect(box.textContent).not.toContain(ID);
+  });
+
+  it('429 too_many_attempts: thông báo thân thiện và nút tạm khóa để khỏi bấm dồn', async () => {
+    override = (c) => (c.url === '/v1/devices/claim' ? jsonRes({ error: 'too_many_attempts' }, 429) : undefined);
+    open('/activate');
+    fill();
+    click('Kích hoạt');
+    expect(await t(/nhập sai mã quá nhiều lần/)).toBeTruthy();
+    const btn = screen.getByRole('button', { name: /Đợi một chút/ }) as HTMLButtonElement;
+    expect(btn.disabled).toBe(true);
+    fireEvent.click(btn);
+    expect(callsTo('POST', '/v1/devices/claim')).toHaveLength(1);
+  });
+
+  it('nhập chữ O thay số 0, chữ thường, có gạch: gửi đúng mã đã chuẩn hóa', async () => {
+    open('/activate');
+    fill('auh-OOOOO1', 'abcde-fghjk');
+    click('Kích hoạt');
+    await t('Thêm người nhận');
+    expect(callsTo('POST', '/v1/devices/claim')[0]!.body).toMatchObject({ device_id: 'AUH-000001', code: 'ABCDEFGHJK' });
+  });
+
+  it('nhập sai: báo lỗi đúng ô và đưa focus vào ô lỗi đầu tiên; không gọi mạng', async () => {
+    open('/activate');
+    fill('xx', 'yy');
+    click('Kích hoạt');
+    expect(await t(/Mã thiết bị chưa đúng/)).toBeTruthy();
+    await waitFor(() => expect(document.activeElement?.id).toBe('device-id'));
+    expect(callsTo('POST', '/v1/devices/claim')).toHaveLength(0);
+  });
+
+  it('tên tủ: NFD được đổi sang NFC, khoảng trắng thừa bị cắt trước khi gửi', async () => {
+    open('/activate');
+    fill();
+    type('Tên tủ', '  Tủ   đông  hải sản  '.normalize('NFD'));
+    click('Kích hoạt');
+    await t('Thêm người nhận');
+    expect(callsTo('POST', '/v1/devices/claim')[0]!.body.name).toBe('Tủ đông hải sản');
+  });
+
+  it('tên tủ quá dài / rỗng bị chặn ngay trên máy', async () => {
+    open('/activate');
+    fill();
+    type('Tên tủ', 'a'.repeat(61));
+    click('Kích hoạt');
+    expect(await t(/Tên tối đa 60 ký tự/)).toBeTruthy();
+    type('Tên tủ', '   ');
+    click('Kích hoạt');
+    expect(await t(/Hãy đặt tên cho tủ/)).toBeTruthy();
+    expect(callsTo('POST', '/v1/devices/claim')).toHaveLength(0);
+  });
+
+  it('quét QR thành công điền mã; QR lạ bị từ chối, không tác dụng phụ', async () => {
+    sdk.scanQr.mockResolvedValueOnce({ status: 'ok', content: 'https://evil.example/?x=1' });
+    open('/activate');
+    click('Quét mã QR');
+    expect(await t(/không phải mã QR của thiết bị Auhono/)).toBeTruthy();
+    expect((screen.getByLabelText('Mã thiết bị') as HTMLInputElement).value).toBe('');
+    sdk.scanQr.mockResolvedValueOnce({ status: 'ok', content: ' auhono://claim?d=auh-000009&c=abcdefghjk\n' });
+    click('Quét mã QR');
+    expect(await t(/Đã quét thiết bị AUH-000009/)).toBeTruthy();
+    expect((screen.getByLabelText('Mã kích hoạt') as HTMLInputElement).value).toBe('ABCDEFGHJK');
+  });
+
+  it('người dùng đóng camera: thông báo nhẹ, không lỗi', async () => {
+    sdk.scanQr.mockResolvedValueOnce({ status: 'cancelled' });
+    open('/activate');
+    click('Quét mã QR');
+    expect(await t(/Chưa quét được mã/)).toBeTruthy();
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('từ chối quyền camera: có nút Cho phép camera và Mở cài đặt quyền; cho phép xong quét lại', async () => {
+    sdk.scanQr.mockResolvedValueOnce({ status: 'camera_denied' }).mockResolvedValueOnce({ status: 'ok', content: 'auhono://claim?d=AUH-000009&c=ABCDEFGHJK' });
+    open('/activate');
+    click('Quét mã QR');
+    expect(await t(/chưa được phép dùng camera/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Mở cài đặt quyền' })).toBeTruthy();
+    click('Cho phép camera');
+    expect(await t(/Đã quét thiết bị AUH-000009/)).toBeTruthy();
+    expect(sdk.askCameraPermission).toHaveBeenCalled();
+  });
+
+  it('có hướng dẫn thiết bị bán lại và giới hạn một tài khoản mỗi thiết bị', async () => {
+    open('/activate');
+    fireEvent.click(await t('Thiết bị đã dùng ở tài khoản khác?'));
+    expect(screen.getByText(/chỉ thuộc/)).toBeTruthy();
+    expect(screen.getByText(/Gỡ thiết bị/, { exact: false })).toBeTruthy();
+  });
+});
+
+// ───────────────────────────── Đổi tên ─────────────────────────────
+
+describe('đổi tên thiết bị', () => {
+  it('tên NFD → NFC, cắt khoảng trắng, gửi PATCH { name }', async () => {
+    open(`/device/${ID}/rename`);
+    await screen.findByLabelText('Tên tủ');
+    type('Tên tủ', '  Tủ  hải sản 🍤  '.normalize('NFD'));
+    click('Lưu');
+    await waitFor(() => expect(callsTo('PATCH', `/v1/devices/${ID}`)).toHaveLength(1));
+    expect(callsTo('PATCH', `/v1/devices/${ID}`)[0]!.body).toEqual({ name: 'Tủ hải sản 🍤' });
+  });
+
+  it('rỗng / quá dài bị chặn ngay; focus vào ô tên', async () => {
+    open(`/device/${ID}/rename`);
+    await screen.findByLabelText('Tên tủ');
+    type('Tên tủ', '   ');
+    click('Lưu');
+    expect(await t(/Hãy đặt tên cho tủ/)).toBeTruthy();
+    await waitFor(() => expect(document.activeElement?.id).toBe('rename'));
+    type('Tên tủ', '🍦'.repeat(31)); // 62 đơn vị UTF-16: server sẽ từ chối
+    click('Lưu');
+    expect(await t(/Tên tối đa 60 ký tự/)).toBeTruthy();
+    expect(callsTo('PATCH', `/v1/devices/${ID}`)).toHaveLength(0);
+  });
+
+  it('không đổi gì thì không gửi', async () => {
+    open(`/device/${ID}/rename`);
+    await screen.findByDisplayValue('Tủ kem');
+    click('Lưu');
+    await new Promise((r) => setTimeout(r, 30));
+    expect(callsTo('PATCH', `/v1/devices/${ID}`)).toHaveLength(0);
+  });
+
+  it('tên có HTML được hiển thị như chữ, không chạy mã', async () => {
+    devices = [makeDevice({ name: '<img src=x onerror="window.__pwned=1"><b>đậm</b>' })];
+    open('/');
+    expect(await t(/<img src=x/)).toBeTruthy();
+    expect(document.querySelector('img')).toBeNull();
+    expect(document.querySelector('.auh-device b')).toBeNull();
+    expect((window as unknown as { __pwned?: number }).__pwned).toBeUndefined();
+  });
+
+  it('tên rất dài không chứa dấu cách vẫn được bọc dòng (CSS overflow-wrap) ở thẻ thiết bị', async () => {
+    devices = [makeDevice({ name: 'Ư'.repeat(60) })];
+    open('/');
+    const el = await t('Ư'.repeat(60));
+    expect(el.className).toContain('auh-name');
+  });
+});
+
+// ───────────────────────────── Ngưỡng ─────────────────────────────
+
+describe('đặt ngưỡng', () => {
+  it('hiện nhiệt độ hiện tại cạnh form và cảnh báo khi tủ đang -12°C mà chọn Tủ đông (-18°C)', async () => {
+    devices = [makeDevice({ latest: { ts: serverNow() - 60, temp_c: -12 }, min_c: 2, max_c: 8, kind: 'chiller' })];
+    open(`/device/${ID}/thresholds`);
+    expect(await t('Nhiệt độ tủ hiện tại')).toBeTruthy();
+    expect(screen.getByText('-12,0°C')).toBeTruthy();
+    // Khoảng hiện tại 2..8 cũng đã lệch (-12 < 2) => cảnh báo ngay
+    expect(screen.getByText(/Nhiệt độ hiện tại -12,0°C đang vượt ngưỡng mới; báo động sẽ chỉ bật sau khi tủ đạt ngưỡng/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: /Tủ đông/ })); // -40..-18: -12 vẫn nóng hơn -18
+    expect(screen.getByText(/đang vượt ngưỡng mới/)).toBeTruthy();
+    expect(screen.getByText(/nâng "Cao nhất"/)).toBeTruthy();
+    // Nâng "Cao nhất" lên -10: hết cảnh báo
+    type('Cao nhất (°C)', '-10');
+    expect(screen.queryByText(/đang vượt ngưỡng mới/)).toBeNull();
+  });
+
+  it('gõ dấu phẩy, dấu trừ Unicode, chữ số toàn chiều rộng: gửi SỐ đúng', async () => {
+    open(`/device/${ID}/thresholds`);
+    await screen.findByLabelText('Cao nhất (°C)');
+    type('Thấp nhất (°C)', '−４０');
+    type('Cao nhất (°C)', '-17,5');
+    type('Báo sau bao nhiêu phút vượt ngưỡng', '20');
+    click('Lưu');
+    await waitFor(() => expect(callsTo('PATCH', `/v1/devices/${ID}`)).toHaveLength(1));
+    expect(callsTo('PATCH', `/v1/devices/${ID}`)[0]!.body).toEqual({ kind: 'freezer', min_c: -40, max_c: -17.5, breach_minutes: 20 });
+  });
+
+  it('lưu xong đọc lại danh sách để biết trạng thái mới (armed) — PATCH rồi GET /v1/devices', async () => {
+    open(`/device/${ID}/thresholds`);
+    await screen.findByLabelText('Cao nhất (°C)');
+    type('Cao nhất (°C)', '-10');
+    const before = callsTo('GET', '/v1/devices').length;
+    click('Lưu');
+    await waitFor(() => expect(callsTo('PATCH', `/v1/devices/${ID}`)).toHaveLength(1));
+    await waitFor(() => expect(callsTo('GET', '/v1/devices').length).toBeGreaterThan(before));
+    const order = calls.map((c) => `${c.method} ${c.url}`);
+    expect(order.lastIndexOf(`PATCH /v1/devices/${ID}`)).toBeLessThan(order.lastIndexOf('GET /v1/devices'));
+  });
+
+  it('không thay đổi gì thì KHÔNG gửi PATCH (tránh làm server đặt lại trạng thái báo động)', async () => {
+    open(`/device/${ID}/thresholds`);
+    await screen.findByLabelText('Cao nhất (°C)');
+    click('Lưu');
+    await new Promise((r) => setTimeout(r, 30));
+    expect(callsTo('PATCH', `/v1/devices/${ID}`)).toHaveLength(0);
+  });
+
+  it('bấm Lưu hai lần liên tiếp chỉ gửi một PATCH', async () => {
+    open(`/device/${ID}/thresholds`);
+    await screen.findByLabelText('Cao nhất (°C)');
+    type('Cao nhất (°C)', '-10');
+    const btn = screen.getByRole('button', { name: 'Lưu' });
+    fireEvent.click(btn);
+    fireEvent.click(btn);
+    await waitFor(() => expect(callsTo('PATCH', `/v1/devices/${ID}`)).toHaveLength(1));
+  });
+
+  it('nhập sai: lỗi đúng ô, focus vào ô lỗi, không gọi PATCH', async () => {
+    open(`/device/${ID}/thresholds`);
+    await screen.findByLabelText('Cao nhất (°C)');
+    type('Cao nhất (°C)', 'abc');
+    click('Lưu');
+    expect(await t(/Hãy nhập một con số/)).toBeTruthy();
+    await waitFor(() => expect(document.activeElement?.id).toBe('max'));
+    expect(callsTo('PATCH', `/v1/devices/${ID}`)).toHaveLength(0);
+  });
+
+  it('giải thích ý nghĩa Cao nhất / Thấp nhất và tủ gia đình -12°C', async () => {
+    open(`/device/${ID}/thresholds`);
+    fireEvent.click(await t('Nâng cao'));
+    expect(screen.getByText(/tủ nóng hơn mức này thì báo/)).toBeTruthy();
+    expect(screen.getByText(/-12°C/)).toBeTruthy();
+    expect(screen.getByText(/Sẽ báo khi nhiệt độ nóng hơn -18,0°C hoặc lạnh hơn -40,0°C liên tục 15 phút/)).toBeTruthy();
+  });
+});
+
+// ───────────────────────────── Người nhận ─────────────────────────────
+
+describe('người nhận', () => {
+  it('số trùng: báo ngay, không gửi', async () => {
+    open(`/device/${ID}/recipients`);
+    await screen.findByLabelText('Tên');
+    type('Tên', 'Vợ 2');
+    type('Số điện thoại Zalo', '+84 (0) 912 345 678');
+    click('Thêm');
+    expect(await t(/Số này đã có trong danh sách \(Vợ\)/)).toBeTruthy();
+    expect(callsTo('POST', `/v1/devices/${ID}/recipients`)).toHaveLength(0);
+  });
+
+  it('số bàn bị từ chối bằng lời giải thích rõ', async () => {
+    open(`/device/${ID}/recipients`);
+    await screen.findByLabelText('Tên');
+    type('Tên', 'Cửa hàng');
+    type('Số điện thoại Zalo', '028 1234 567');
+    click('Thêm');
+    expect(await t(/số điện thoại bàn/)).toBeTruthy();
+  });
+
+  it('bấm Thêm đúp chỉ tạo MỘT người nhận', async () => {
+    open(`/device/${ID}/recipients`);
+    await screen.findByLabelText('Tên');
+    type('Tên', 'Quản lý');
+    type('Số điện thoại Zalo', '0987654321');
+    const btn = screen.getByRole('button', { name: 'Thêm' });
+    fireEvent.click(btn);
+    fireEvent.click(btn);
+    expect(await t('0987 654 321')).toBeTruthy();
+    expect(callsTo('POST', `/v1/devices/${ID}/recipients`)).toHaveLength(1);
+  });
+
+  it('đủ 5 người: ẩn form và giải thích', async () => {
+    recipients = [1, 2, 3, 4, 5].map((i) => ({ id: i, name: `Người ${i}`, phone: `8491234567${i}` }));
+    open(`/device/${ID}/recipients`);
+    expect(await t(/Đã đủ 5 người/)).toBeTruthy();
+    expect(screen.queryByLabelText('Tên')).toBeNull();
+  });
+
+  it('xóa người CUỐI CÙNG: hộp thoại cảnh báo sẽ không còn ai nhận tin; sau khi xóa hiện cảnh báo nổi bật', async () => {
+    open(`/device/${ID}/recipients`);
+    click(await screen.findByRole('button', { name: 'Xóa Vợ' }).then(() => 'Xóa Vợ'));
+    expect(await t(/người nhận cuối cùng/)).toBeTruthy();
+    const dialog = screen.getByRole('dialog', {}) ;
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Xóa' }));
+    expect(await t('Chưa có người nhận cảnh báo — sẽ không có tin nhắn nào được gửi.')).toBeTruthy();
+    expect(callsTo('DELETE', `/v1/devices/${ID}/recipients/1`)).toHaveLength(1);
+  });
+
+  it('nhắc người nhận cần có Zalo và có thể không nhận nếu chặn OA; giới hạn 1 tài khoản/thiết bị', async () => {
+    open(`/device/${ID}/recipients`);
+    expect(await t(/cần có Zalo dùng đúng số đó/)).toBeTruthy();
+    expect(screen.getByText(/đã chặn tài khoản Auhono/)).toBeTruthy();
+    expect(screen.getByText(/chỉ thuộc một tài khoản Zalo/)).toBeTruthy();
+  });
+
+  it('gửi tin lỗi 24h: hiện cảnh báo ở màn hình người nhận', async () => {
+    devices = [makeDevice({ notify_failures_24h: 2 })];
+    open(`/device/${ID}/recipients`);
+    expect(await t(/Không gửi được tin cho một số người nhận/)).toBeTruthy();
+  });
+
+  it('người thứ 5 đã thêm nhưng mất phản hồi, bấm lại bị 409: vẫn coi là thành công', async () => {
+    recipients = [1, 2, 3, 4].map((i) => ({ id: i, name: `Người ${i}`, phone: `8491234567${i}` }));
+    let first = true;
+    override = (c) => {
+      if (c.method === 'POST' && c.url.endsWith('/recipients')) {
+        if (first) {
+          first = false;
+          recipients.push({ id: 5, ...c.body }); // server đã lưu…
+          throw new TypeError('Failed to fetch'); // …nhưng phản hồi mất
+        }
+        return jsonRes({ error: 'too_many_recipients' }, 409);
+      }
+      return undefined;
+    };
+    open(`/device/${ID}/recipients`);
+    await screen.findByLabelText('Tên');
+    type('Tên', 'Người 5');
+    type('Số điện thoại Zalo', '0987654321');
+    click('Thêm');
+    expect(await t('0987 654 321')).toBeTruthy();
+    expect(screen.queryByText(/tối đa 5 người nhận/)).toBeNull();
+  });
+});
+
+// ───────────────────────────── Gỡ thiết bị ─────────────────────────────
+
+describe('gỡ thiết bị', () => {
+  it('bấm xác nhận đúp chỉ gửi một DELETE', async () => {
+    open(`/device/${ID}`);
+    click(await screen.findByRole('button', { name: 'Gỡ thiết bị' }).then(() => 'Gỡ thiết bị'));
+    await t('Gỡ thiết bị này?');
+    const buttons = screen.getAllByRole('button', { name: 'Gỡ thiết bị' });
+    const confirm = buttons[buttons.length - 1]!;
+    fireEvent.click(confirm);
+    fireEvent.click(confirm);
+    await waitFor(() => expect(callsTo('DELETE', `/v1/devices/${ID}`)).toHaveLength(1));
+  });
+
+  it('server đã gỡ nhưng mất phản hồi, bấm lại nhận 404: vẫn thành công', async () => {
+    override = (c) => (c.method === 'DELETE' && c.url === `/v1/devices/${ID}` ? jsonRes({ error: 'not_found' }, 404) : undefined);
+    open(`/device/${ID}`);
+    click(await screen.findByRole('button', { name: 'Gỡ thiết bị' }).then(() => 'Gỡ thiết bị'));
+    await t('Gỡ thiết bị này?');
+    const buttons = screen.getAllByRole('button', { name: 'Gỡ thiết bị' });
+    fireEvent.click(buttons[buttons.length - 1]!);
+    expect(await t('Thiết bị của tôi')).toBeTruthy(); // đã về màn hình chính
+    expect(screen.queryByText(/Không tìm thấy thiết bị/)).toBeNull();
+    expect(callsTo('DELETE', `/v1/devices/${ID}`)).toHaveLength(1);
+  });
+});
+
+// ───────────────────────────── Biểu đồ, giao diện ─────────────────────────────
+
+describe('giao diện', () => {
+  it('màn hình 320 px: biểu đồ dùng bề rộng thật (viewBox khớp), không co chữ', async () => {
+    const orig = Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth');
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', { configurable: true, get: () => 288 });
+    try {
+      open(`/device/${ID}`);
+      await waitFor(() => expect(document.querySelector('svg.auh-chart')).not.toBeNull());
+      expect(document.querySelector('svg.auh-chart')!.getAttribute('viewBox')).toBe('0 0 288 210');
+    } finally {
+      if (orig) Object.defineProperty(HTMLElement.prototype, 'clientWidth', orig);
+      else delete (HTMLElement.prototype as unknown as Record<string, unknown>).clientWidth;
+    }
+  });
+
+  it('biểu đồ có gạch chéo cho vùng mất kết nối (không chỉ dựa vào màu) và tóm tắt bằng chữ', async () => {
+    const t0 = serverNow();
+    readings = () => ({ server_time: t0, min_c: -40, max_c: -18, points: [{ t: t0 - 20000, avg: -20, min: -21, max: -19 }, { t: t0 - 19700, avg: -20, min: -21, max: -19 }] });
+    devices = [makeDevice({ last_seen: t0 - 19700, latest: { ts: t0 - 19700, temp_c: -20 }, phase: 'offline' })];
+    open(`/device/${ID}`);
+    await waitFor(() => expect(document.querySelector('svg.auh-chart pattern')).not.toBeNull());
+    expect(document.querySelector('svg.auh-chart rect.gap')!.getAttribute('fill')).toMatch(/^url\(#.+-hatch\)$/);
+    expect(document.querySelector('svg.auh-chart desc')!.textContent).toContain('mất kết nối');
+  });
+
+  it('chế độ tối: đặt data-auh-theme="dark" khi Zalo ở chế độ tối', async () => {
+    sdk.dark = true;
+    open('/');
+    await t('Tủ kem');
+    expect(document.documentElement.getAttribute('data-auh-theme')).toBe('dark');
+  });
+
+  it('huy hiệu trạng thái có ký hiệu + chữ (không chỉ màu)', async () => {
+    open('/');
+    const badge = (await t('Bình thường')).closest('.auh-badge')!;
+    expect(badge.textContent).toContain('✓');
+  });
+});
+
+describe('ErrorBoundary', () => {
+  it('lỗi lập trình bất ngờ: hiện thông báo + nút mở lại, không trắng màn hình', () => {
+    const Boom = () => {
+      throw new Error('boom');
+    };
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    render(
+      <ErrorBoundary>
+        <Boom />
+      </ErrorBoundary>,
+    );
+    expect(screen.getByText('Ứng dụng gặp sự cố')).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Mở lại ứng dụng' })).toBeTruthy();
+    errorSpy.mockRestore();
+  });
+});
+
+describe('tự làm mới trong màn hình (fake timers)', () => {
+  it('màn hình chính tải lại mỗi 60 giây và dừng khi rời màn hình', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] });
+    const { unmount } = open('/');
+    await act(async () => { await vi.advanceTimersByTimeAsync(50); });
+    expect(callsTo('GET', '/v1/devices')).toHaveLength(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(61_000); });
+    expect(callsTo('GET', '/v1/devices')).toHaveLength(2);
+    unmount();
+    await act(async () => { await vi.advanceTimersByTimeAsync(5 * 60_000); });
+    expect(callsTo('GET', '/v1/devices')).toHaveLength(2);
+  });
+
+  it('chi tiết thiết bị: biểu đồ được làm mới theo chu kỳ (số đo mới hiện ra khi đang xem sự cố)', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'setInterval', 'clearInterval', 'Date'] });
+    open(`/device/${ID}`);
+    await act(async () => { await vi.advanceTimersByTimeAsync(50); });
+    expect(callsTo('GET', /readings/)).toHaveLength(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(61_000); });
+    expect(callsTo('GET', /readings/)).toHaveLength(2);
+  });
+});

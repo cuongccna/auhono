@@ -67,6 +67,7 @@ ServerReply parseReply(int status, const char* body, size_t len, bool requireOkF
     }
     case 413: r.kind = ReplyKind::TooLarge; return r;
     case 400: r.kind = ReplyKind::BadRequest; return r;
+    case 429: r.kind = ReplyKind::RateLimited; return r;
     default: r.kind = ReplyKind::Unknown; return r;
   }
 }

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { normalizeActivationCode, normalizeDeviceId, parseClaimQr, validateManualClaim } from './qr.ts';
+import { deriveActivationCode } from '../../../server/src/crypto.ts';
 
 const CODE = 'ABCDEFGHJK'; // 10 ký tự thuộc bảng chữ Crockford (không có I, L, O, U)
 
@@ -114,5 +115,82 @@ describe('validateManualClaim', () => {
       expect(r2.idError).toBeUndefined();
       expect(r2.codeError).toBeTruthy();
     }
+  });
+});
+
+// ───────── Kiểm chứng với thuật toán THẬT của server (server/src/crypto.ts, chỉ đọc) ─────────
+
+/** Đúng quy tắc so khớp của server/src/app.ts (claim): hoa + bỏ ký tự ngoài 0-9A-Z, KHÔNG ánh xạ O→0. */
+const serverNormalize = (code: string) => code.toUpperCase().replace(/[^0-9A-Z]/g, '');
+
+describe('khớp với mã kích hoạt thật do server sinh', () => {
+  const MASTER = 'test-master-secret-0123456789abcdef0123456789';
+  const ids = Array.from({ length: 300 }, (_, i) => `AUH-${String(i + 1).padStart(6, '0')}`);
+
+  it('mã in trên hộp (mọi kiểu gõ) => app gửi đúng chuỗi mà server so khớp', async () => {
+    for (const id of ids) {
+      const code = await deriveActivationCode(MASTER, id);
+      expect(code).toMatch(/^[0-9A-HJKMNP-TV-Z]{10}$/); // bảng chữ cái không có I, L, O, U
+      const typed = [code, code.toLowerCase(), `${code.slice(0, 5)}-${code.slice(5)}`, ` ${code.slice(0, 4)} ${code.slice(4, 7)}\n${code.slice(7)} `];
+      for (const t of typed) expect(normalizeActivationCode(t)).toBe(serverNormalize(code));
+    }
+  });
+
+  it('nhầm O/I/L: kết quả app gửi đúng bằng mã thật (chỉ đổi các chữ mà mã thật KHÔNG BAO GIỜ chứa)', async () => {
+    for (const id of ids) {
+      const code = await deriveActivationCode(MASTER, id);
+      // Người dùng nhìn thấy "0" và "1" trên hộp, có thể gõ "O" và "l"/"I".
+      const confused = code.replace(/0/g, 'O').replace(/1/g, 'I');
+      expect(normalizeActivationCode(confused)).toBe(code);
+      expect(normalizeActivationCode(confused.toLowerCase().replace(/i/g, 'l'))).toBe(code);
+    }
+  });
+
+  it('không va chạm: ánh xạ chỉ tác động lên I, L, O — không có mã thật nào bị đổi, và hai mã thật khác nhau không bao giờ thành một', async () => {
+    const seen = new Map<string, string>();
+    for (const id of ids) {
+      const code = await deriveActivationCode(MASTER, id);
+      expect(normalizeActivationCode(code)).toBe(code); // mã thật đi qua nguyên vẹn
+      expect(seen.has(code)).toBe(false);
+      seen.set(code, id);
+    }
+    // Bảng chữ cái của server không chứa I, L, O, U => mọi ký tự bị ánh xạ đều không thể là ký tự thật.
+    for (const ch of 'ILOU') for (const [code] of seen) expect(code.includes(ch)).toBe(false);
+  });
+
+  it('chữ U (không có trong bảng chữ cái) bị từ chối ngay trên máy, không đoán mò', () => {
+    expect(normalizeActivationCode('ABCDEFGHJU')).toBeNull();
+  });
+
+  it('QR do provision.ts tạo ra được đọc đúng', async () => {
+    const code = await deriveActivationCode(MASTER, 'AUH-000042');
+    expect(parseClaimQr(`auhono://claim?d=AUH-000042&c=${code}`)).toEqual({ ok: true, deviceId: 'AUH-000042', code });
+  });
+});
+
+describe('nhập tay / dán: chữ toàn chiều rộng, ký tự vô hình, dán cả đường dẫn', () => {
+  it('chữ và số toàn chiều rộng (bàn phím CJK) được đưa về ASCII', () => {
+    expect(normalizeActivationCode('ＡＢＣＤＥ－ＦＧＨＪＫ')).toBe('ABCDEFGHJK');
+    expect(normalizeDeviceId('ＡＵＨ－０００００１')).toBe('AUH-000001');
+  });
+  it('ký tự vô hình khi dán từ tin nhắn Zalo (zero-width, BOM, NBSP)', () => {
+    expect(normalizeActivationCode('ABCDE​FGHJK')).toBe('ABCDEFGHJK');
+    expect(normalizeActivationCode('﻿ABCDE FGHJK')).toBe('ABCDEFGHJK');
+    expect(normalizeDeviceId('AUH​-000001')).toBe('AUH-000001');
+  });
+  it('dán nguyên đường dẫn QR vào ô mã thiết bị hoặc ô mã kích hoạt', () => {
+    const url = 'auhono://claim?d=AUH-000009&c=ABCDEFGHJK';
+    expect(validateManualClaim(url, '')).toEqual({ ok: true, deviceId: 'AUH-000009', code: 'ABCDEFGHJK' });
+    expect(validateManualClaim('', url)).toEqual({ ok: true, deviceId: 'AUH-000009', code: 'ABCDEFGHJK' });
+  });
+  it('tên tham số viết hoa vẫn đọc được; đường dẫn lạ vẫn bị từ chối', () => {
+    expect(parseClaimQr('AUHONO://CLAIM?D=auh-000009&C=abcdefghjk')).toEqual({ ok: true, deviceId: 'AUH-000009', code: 'ABCDEFGHJK' });
+    expect(parseClaimQr('https://evil.example/claim?d=AUH-000009&c=ABCDEFGHJK').ok).toBe(false);
+    expect(parseClaimQr('auhono://claim?d=AUH-000009&c=ABCDEFGHJK&x=1').ok).toBe(false);
+    expect(parseClaimQr('auhono://claim?d=AUH-000009&c=ABCDEFGHJK#frag').ok).toBe(false);
+  });
+  it('QR có xuống dòng ở cuối / khoảng trắng hai đầu vẫn đọc được; xuống dòng ở giữa bị từ chối', () => {
+    expect(parseClaimQr('  auhono://claim?d=AUH-000009&c=ABCDEFGHJK\r\n')).toMatchObject({ ok: true });
+    expect(parseClaimQr('auhono://claim?d=AUH-000009\n&c=ABCDEFGHJK').ok).toBe(false);
   });
 });

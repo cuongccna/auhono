@@ -8,7 +8,9 @@ vi.mock('../sdk.ts', () => ({
   getToken: async () => 'tok-0123456789',
   requestAccess: async () => undefined,
   openPermissions: async () => undefined,
-  scanQr: async () => 'auhono://claim?d=AUH-000009&c=ABCDEFGHJK',
+  scanQr: async () => ({ status: 'ok', content: 'auhono://claim?d=AUH-000009&c=ABCDEFGHJK' }),
+  askCameraPermission: async () => true,
+  isZaloDarkTheme: () => false,
 }));
 
 import Root from './app.tsx';
@@ -97,7 +99,7 @@ describe('ứng dụng (jsdom, SDK giả lập)', () => {
     fireEvent.change(name, { target: { value: 'Vợ' } });
     fireEvent.change(phone, { target: { value: '123' } });
     fireEvent.click(screen.getByRole('button', { name: 'Thêm' }));
-    expect(await screen.findByText(/Số điện thoại chưa đúng/)).toBeTruthy();
+    expect(await screen.findByText(/Số điện thoại còn thiếu số/)).toBeTruthy();
     expect(calls.some((c) => c.method === 'POST')).toBe(false);
 
     fireEvent.change(phone, { target: { value: '+84 912 345 678' } });

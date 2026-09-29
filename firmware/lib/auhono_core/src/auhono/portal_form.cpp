@@ -1,5 +1,7 @@
 #include "auhono/portal_form.h"
 
+#include "auhono/hex.h"
+
 namespace auhono {
 
 std::string htmlEscape(const std::string& in) {
@@ -54,8 +56,52 @@ const char* formErrorText(FormError e) {
   return "";
 }
 
-std::string pickSsid(const std::string& typed, const std::string& picked) {
-  return typed.empty() ? picked : typed;
+std::string ssidToken(const std::string& ssid) {
+  return toHex(reinterpret_cast<const uint8_t*>(ssid.data()), ssid.size());
+}
+
+bool ssidFromToken(const std::string& token, std::string& out) {
+  if (token.empty() || token.size() > kMaxSsidLen * 2) return false;
+  uint8_t buf[kMaxSsidLen];
+  size_t n = 0;
+  if (!fromHex(token.data(), token.size(), buf, sizeof buf, &n) || n == 0) return false;
+  out.assign(reinterpret_cast<const char*>(buf), n);
+  return true;
+}
+
+bool resolveSsid(const std::string& typed, const std::string& pickToken, std::string& out) {
+  if (!typed.empty()) { out = typed; return true; }
+  if (pickToken.empty()) return false;
+  return ssidFromToken(pickToken, out);
+}
+
+std::string sanitizeUtf8(const std::string& in) {
+  std::string out;
+  out.reserve(in.size());
+  const size_t n = in.size();
+  size_t i = 0;
+  while (i < n) {
+    const unsigned char c = static_cast<unsigned char>(in[i]);
+    size_t len = 0;
+    uint32_t cp = 0;
+    if (c < 0x80) { len = 1; cp = c; }
+    else if (c >= 0xC2 && c <= 0xDF) { len = 2; cp = c & 0x1Fu; }
+    else if (c >= 0xE0 && c <= 0xEF) { len = 3; cp = c & 0x0Fu; }
+    else if (c >= 0xF0 && c <= 0xF4) { len = 4; cp = c & 0x07u; }
+    bool ok = len != 0 && i + len <= n;
+    for (size_t k = 1; ok && k < len; k++) {
+      const unsigned char cc = static_cast<unsigned char>(in[i + k]);
+      if ((cc & 0xC0) != 0x80) ok = false;
+      else cp = (cp << 6) | (cc & 0x3Fu);
+    }
+    if (ok) {  // loại mã hóa quá dài, surrogate, và > U+10FFFF
+      if (len == 3 && (cp < 0x800 || (cp >= 0xD800 && cp <= 0xDFFF))) ok = false;
+      if (len == 4 && (cp < 0x10000 || cp > 0x10FFFF)) ok = false;
+    }
+    if (ok) { out.append(in, i, len); i += len; }
+    else { out.push_back('?'); ++i; }
+  }
+  return out;
 }
 
 std::string apSsid(const std::string& deviceId) {

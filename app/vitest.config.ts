@@ -5,5 +5,7 @@ export default defineConfig({
   test: {
     environment: 'node',
     include: ['src/**/*.test.{ts,tsx}'],
+    // Cho phép import '*.css?raw' để test đọc mã màu thật (mặc định vitest trả chuỗi rỗng cho CSS).
+    css: { include: [/app\.css/] },
   },
 });

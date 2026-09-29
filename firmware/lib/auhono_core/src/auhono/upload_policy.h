@@ -48,6 +48,14 @@ class UploadPolicy {
   UploadPolicy(uint32_t periodMs = 300000, uint32_t immediateMinMs = 60000)
       : period_(periodMs), immediate_(immediateMinMs) {}
 
+  /// Chống "bầy đàn": không gửi gì trước `nowMs + delayMs` (gọi MỘT lần khi bắt đầu được phép gửi sau khi khởi động;
+  /// delay ngẫu nhiên theo từng máy). Nhiều máy cùng khởi động sau một lần mất điện khu vực sẽ không đập server cùng lúc.
+  void delayStart(uint32_t nowMs, uint32_t delayMs) {
+    startGate_ = true;
+    startAt_ = nowMs + delayMs;
+  }
+  bool startDelayPending(uint32_t nowMs) const { return startGate_ && static_cast<int32_t>(nowMs - startAt_) < 0; }
+
   /// Báo có số đo mới; `outOfRange` = vượt ngưỡng hiện hành.
   void noteReading(bool outOfRange) { if (outOfRange) immediatePending_ = true; }
 
@@ -67,6 +75,8 @@ class UploadPolicy {
   bool immediatePending_ = false;
   bool retryPending_ = false;
   uint32_t retryAt_ = 0;
+  bool startGate_ = false;
+  uint32_t startAt_ = 0;
 };
 
 }  // namespace auhono

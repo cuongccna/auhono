@@ -1,6 +1,9 @@
 #include "auhono/readings.h"
 
 #include <cmath>
+#include <limits>
+
+#include "auhono/time_policy.h"
 
 namespace auhono {
 
@@ -13,7 +16,29 @@ ReadStatus classifyCelsius(float c) {
 }
 
 int16_t celsiusToCenti(float c) {
-  return static_cast<int16_t>(std::lround(c * 100.0f));
+  if (std::isnan(c)) return 0;
+  // Tính bằng double: c*100 với float có thể lệch 1 ulp ngay sát điểm .5. Bão hòa trước khi ép kiểu.
+  const double v = std::round(static_cast<double>(c) * 100.0);  // round(): nửa ra xa số 0
+  if (v >= static_cast<double>(std::numeric_limits<int16_t>::max())) return std::numeric_limits<int16_t>::max();
+  if (v <= static_cast<double>(std::numeric_limits<int16_t>::min())) return std::numeric_limits<int16_t>::min();
+  return static_cast<int16_t>(v == 0.0 ? 0.0 : v);  // -0.0 -> 0
+}
+
+bool toCenti(float c, int16_t& centi) {
+  if (classifyCelsius(c) != ReadStatus::Ok) return false;
+  centi = celsiusToCenti(c);
+  return true;
+}
+
+bool monoToUnix(uint32_t mono, const TimeAnchor& a, uint32_t& unixOut) {
+  if (!isPlausibleUnix(a.unixNow)) return false;
+  if (mono > a.monoNow) return false;                 // số đo "ở tương lai": không thể
+  const uint32_t age = a.monoNow - mono;
+  if (age > a.unixNow) return false;
+  const uint32_t t = a.unixNow - age;
+  if (!isPlausibleUnix(t)) return false;
+  unixOut = t;
+  return true;
 }
 
 ReadingBuffer::ReadingBuffer(size_t capacity) : data_(capacity == 0 ? 1 : capacity) {}
@@ -50,6 +75,12 @@ size_t ReadingBuffer::dropOlderThan(uint32_t cutoff) {
     ++removed;
   }
   return removed;
+}
+
+bool ReadingBuffer::newest(Reading& out) const {
+  if (count_ == 0) return false;
+  out = data_[(head_ + count_ - 1) % data_.size()];
+  return true;
 }
 
 // ── Định dạng JSON ─────────────────────────────────────────────────────────
@@ -103,7 +134,7 @@ size_t formatCenti(int16_t centi, char* out, size_t cap) {
   return w.len;
 }
 
-size_t buildReadingsBody(char* out, size_t cap, const char* fw, const Reading* readings, size_t n) {
+size_t buildReadingsBody(char* out, size_t cap, const char* fw, const WireReading* readings, size_t n) {
   if (cap == 0 || n == 0 || n > kMaxBatch) return 0;
   Writer w{out, cap};
   w.put('{');

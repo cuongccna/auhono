@@ -16,6 +16,9 @@ class IPlatform {
  public:
   virtual ~IPlatform() = default;
   virtual uint32_t millis() = 0;
+  /// Giây từ lúc khởi động (đơn điệu, 64-bit trên chip nên không tràn; KHÔNG bị NTP/setUnix làm nhảy).
+  /// Dùng để đóng dấu số đo trước khi có giờ thật (xem readings.h).
+  virtual uint32_t monoSeconds() = 0;
   /// Giờ unix hiện tại (giây). Chỉ có ý nghĩa khi clockTrusted().
   virtual uint32_t unixNow() = 0;
   /// Giờ đã được đồng bộ từ NTP hoặc từ server (không phải 1970 mặc định).
@@ -37,6 +40,18 @@ struct HttpRequest {
 struct HttpResponse {
   int status = 0;    // <= 0: lỗi mạng
   std::string body;  // đã giới hạn kích thước ở tầng dưới
+  /// Kết nối TLS thất bại vì KHÔNG XÁC THỰC được chứng chỉ máy chủ (CA gốc đổi/hết hạn, bị chặn/can thiệp).
+  /// Dùng cho chế độ cứu hộ OTA (maintenance.h, TlsRescue).
+  bool certError = false;
+};
+
+/// Nguồn body được dựng LẠI ở mỗi lần thử (sau khi đồng hồ được chỉnh theo server thì giờ trong body cũng
+/// phải đổi theo, nếu không số đo sẽ mang dấu thời gian sai và server (INSERT OR IGNORE) giữ luôn dữ liệu sai).
+class IBodySource {
+ public:
+  virtual ~IBodySource() = default;
+  /// Ghi body vào `out` (tối đa `cap` byte). Trả độ dài; 0 nghĩa là không dựng được (không gửi gì).
+  virtual size_t build(char* out, size_t cap) = 0;
 };
 
 class IHttp {
@@ -60,6 +75,13 @@ class DeviceClient {
   ServerReply call(const std::string& method, const std::string& pathAndQuery, const uint8_t* body,
                    size_t bodyLen, bool requireOkField = true);
 
+  /// Như call(), nhưng body được dựng lại (source.build) NGAY TRƯỚC MỖI lần ký/gửi.
+  ServerReply callBuilt(const std::string& method, const std::string& pathAndQuery, IBodySource& source,
+                        bool requireOkField = true);
+
+  /// Kích thước bộ đệm body dựng sẵn (20 số đo ~ 560 byte; server giới hạn 4096).
+  static constexpr size_t kBodyCap = 1024;
+
   /// GET /v1/time (không ký) để chỉnh giờ khi NTP lỗi. true nếu đã chỉnh được đồng hồ.
   bool syncTimeFromServer();
 
@@ -72,6 +94,10 @@ class DeviceClient {
   IPlatform& platform_;
   IHttp& http_;
   HttpResponse last_;
+  char bodyBuf_[kBodyCap];  // DeviceClient nằm trên heap (unique_ptr) nên không tốn stack
+
+  ServerReply run(const std::string& method, const std::string& pathAndQuery, const uint8_t* fixedBody,
+                  size_t fixedLen, IBodySource* source, bool requireOkField);
 };
 
 }  // namespace auhono

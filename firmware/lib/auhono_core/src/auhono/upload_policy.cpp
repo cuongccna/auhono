@@ -4,6 +4,7 @@ namespace auhono {
 
 UploadReason UploadPolicy::poll(uint32_t nowMs, bool haveData) {
   if (!haveData) return UploadReason::None;
+  if (startDelayPending(nowMs)) return UploadReason::None;
 
   if (retryPending_) {
     // Đang trong chuỗi backoff: mọi lần thử (kể cả "gửi ngay") phải chờ hết backoff.

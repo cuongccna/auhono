@@ -1,22 +1,50 @@
 /* Giao diện Auhono: mobile-first, chữ lớn, nút cao >= 48px cho người dùng lớn tuổi/không rành công nghệ. */
 :root {
   --auh-primary: var(--zaui-light-color-primary, #006af5);
+  --auh-on-primary: #ffffff;
   --auh-bg: #f2f4f7;
   --auh-card: #ffffff;
+  --auh-input-bg: #ffffff;
   --auh-text: #141415;
   --auh-muted: #5b6470;
   --auh-border: #dde1e6;
-  --auh-ok: #1a7f37;
+  --auh-ok: #166b2e;
   --auh-ok-bg: #e3f5e8;
   --auh-alarm: #c62828;
   --auh-alarm-bg: #fdeaea;
   --auh-off: #8a5a00;
   --auh-off-bg: #fff3d6;
+  --auh-info: #0b4fb3;
+  --auh-info-bg: #e6f0fe;
   --auh-neutral-bg: #e9ebed;
   --auh-tap: 48px;
   --auh-top: calc(var(--zaui-safe-area-inset-top, 0px) + 56px);
 }
 
+/* Chế độ tối (Zalo có chế độ tối): app.tsx đặt data-auh-theme="dark" khi Zalo/hệ thống ở chế độ tối. */
+:root[data-auh-theme='dark'] {
+  --auh-primary: #6aa6ff;
+  --auh-on-primary: #06101f;
+  --auh-bg: #0f1115;
+  --auh-card: #1a1d23;
+  --auh-input-bg: #12151a;
+  --auh-text: #eceef1;
+  --auh-muted: #a9b1bd;
+  --auh-border: #3a414c;
+  --auh-ok: #7fdc98;
+  --auh-ok-bg: #16301f;
+  --auh-alarm: #ff9a92;
+  --auh-alarm-bg: #3b1c1c;
+  --auh-off: #f2c46b;
+  --auh-off-bg: #3a2e12;
+  --auh-info: #9cc4ff;
+  --auh-info-bg: #14284a;
+  --auh-neutral-bg: #2a2f37;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
 body {
   background: var(--auh-bg);
   color: var(--auh-text);
@@ -85,15 +113,15 @@ body {
   font-size: 17px;
   font-weight: 600;
   background: var(--auh-primary);
-  color: #fff;
+  color: var(--auh-on-primary);
   cursor: pointer;
 }
 .auh-btn[disabled] {
   opacity: 0.55;
 }
 .auh-btn-secondary {
-  background: #e6f0fe;
-  color: var(--auh-primary);
+  background: var(--auh-info-bg);
+  color: var(--auh-info);
 }
 .auh-btn-danger {
   background: var(--auh-alarm-bg);
@@ -117,7 +145,7 @@ body {
   font-size: 17px;
   border: 1.5px solid var(--auh-border);
   border-radius: 12px;
-  background: #fff;
+  background: var(--auh-input-bg);
   color: var(--auh-text);
 }
 .auh-input:focus {
@@ -150,7 +178,7 @@ body {
   padding: 12px;
   border-radius: 12px;
   border: 2px solid var(--auh-border);
-  background: #fff;
+  background: var(--auh-input-bg);
   color: var(--auh-text);
   font-size: 16px;
   cursor: pointer;
@@ -167,7 +195,7 @@ body {
 }
 .auh-choice[aria-pressed='true'] {
   border-color: var(--auh-primary);
-  background: #e6f0fe;
+  background: var(--auh-info-bg);
 }
 
 /* Huy hiệu trạng thái: luôn có chữ (không chỉ dựa vào màu) */
@@ -179,7 +207,7 @@ body {
   border-radius: 999px;
   font-size: 15px;
   font-weight: 600;
-  white-space: nowrap;
+  min-height: 28px;
 }
 .auh-badge-ok { background: var(--auh-ok-bg); color: var(--auh-ok); }
 .auh-badge-alarm { background: var(--auh-alarm-bg); color: var(--auh-alarm); }
@@ -218,7 +246,7 @@ body {
 }
 .auh-banner-error { background: var(--auh-alarm-bg); color: var(--auh-alarm); }
 .auh-banner-warn { background: var(--auh-off-bg); color: var(--auh-off); }
-.auh-banner-info { background: #e6f0fe; color: #0b4fb3; }
+.auh-banner-info { background: var(--auh-info-bg); color: var(--auh-info); }
 
 .auh-center {
   text-align: center;
@@ -252,7 +280,7 @@ body {
   display: block;
 }
 .auh-chart text {
-  font-size: 10px;
+  font-size: 11px;
   fill: var(--auh-muted);
 }
 .auh-chart .band { fill: var(--auh-ok); fill-opacity: 0.12; }
@@ -261,8 +289,10 @@ body {
 .auh-chart .envelope { fill: var(--auh-primary); fill-opacity: 0.15; stroke: none; }
 .auh-chart .line { fill: none; stroke: var(--auh-primary); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
 .auh-chart .dot { fill: var(--auh-primary); }
-.auh-chart .gap { fill: var(--auh-off); fill-opacity: 0.12; }
-.auh-chart .latest { fill: #fff; stroke: var(--auh-primary); stroke-width: 2.5; }
+.auh-chart .gap { fill-opacity: 1; }
+.auh-chart .hatch { stroke: var(--auh-off); stroke-width: 2; stroke-opacity: 0.45; }
+.auh-chart .out { fill: var(--auh-alarm); stroke: var(--auh-card); stroke-width: 1; }
+.auh-chart .latest { fill: var(--auh-card); stroke: var(--auh-primary); stroke-width: 2.5; }
 
 .auh-legend {
   display: flex;
@@ -279,4 +309,61 @@ body {
   border-radius: 3px;
   margin-right: 4px;
   vertical-align: -1px;
+}
+.auh-key-band { background: var(--auh-ok); opacity: 0.3; }
+.auh-key-env { background: var(--auh-primary); opacity: 0.3; }
+.auh-key-gap {
+  background: repeating-linear-gradient(45deg, var(--auh-off) 0 2px, transparent 2px 5px);
+  border: 1px solid var(--auh-off);
+}
+.auh-key-out {
+  background: var(--auh-alarm);
+  transform: rotate(45deg) scale(0.75);
+  border-radius: 1px !important;
+}
+
+/* Bố cục co giãn: màn hình 320 px và chữ to không được tràn ngang */
+.auh-wrap { flex-wrap: wrap; }
+.auh-name {
+  font-size: 18px;
+  min-width: 0;
+  overflow-wrap: anywhere; /* tên rất dài / không có dấu cách không được làm vỡ thẻ */
+}
+.auh-grow { flex: 1; min-width: 0; }
+.auh-card-note {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: var(--auh-off-bg);
+  color: var(--auh-off);
+  font-size: 14px;
+  line-height: 19px;
+}
+.auh-list {
+  margin: 8px 0 0;
+  padding-left: 20px;
+  font-size: 15px;
+  line-height: 21px;
+}
+.auh-list li + li { margin-top: 6px; }
+main, .auh-card { overflow-wrap: break-word; }
+
+/* Vòng focus rõ ràng cho người dùng bàn phím/trình đọc màn hình */
+.auh-btn:focus-visible,
+.auh-choice:focus-visible,
+.auh-device:focus-visible,
+.auh-details summary:focus-visible,
+.auh-banner:focus-visible {
+  outline: 3px solid var(--auh-primary);
+  outline-offset: 2px;
+}
+.auh-banner[tabindex='-1']:focus { outline: none; }
+
+@media (max-width: 359px) {
+  .auh-choices { grid-template-columns: 1fr; }
+  .auh-temp-big { font-size: 34px; line-height: 38px; }
+  .auh-main { padding-left: 12px; padding-right: 12px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  * { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
 }

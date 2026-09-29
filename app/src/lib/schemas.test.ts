@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { AppError } from './errors.ts';
-import { parseDevice, parseDeviceList, parseOk, parseReadings, parseRecipient, parseRecipientList } from './schemas.ts';
+import { MAX_POINTS, parseDevice, parseDeviceList, parseOk, parseReadings, parseRecipient, parseRecipientList, parseServerTime } from './schemas.ts';
 
 const device = {
   id: 'AUH-000001',
@@ -36,9 +36,12 @@ describe('parseDevice', () => {
     expect(d.last_seen).toBeNull();
     expect(d.firmware).toBeNull();
   });
+  it('loại tủ lạ (server thêm loại mới) => "other", không làm hỏng thiết bị', () => {
+    expect(parseDevice({ ...device, kind: 'oven' }).kind).toBe('other');
+    expect(parseDevice({ ...device, kind: 5 }).kind).toBe('other');
+  });
   it('sai dạng => bad_response', () => {
     bad(() => parseDevice(null));
-    bad(() => parseDevice({ ...device, kind: 'oven' }));
     bad(() => parseDevice({ ...device, min_c: '−40' }));
     bad(() => parseDevice({ ...device, min_c: NaN }));
     bad(() => parseDevice({ ...device, latest: { ts: 1 } }));
@@ -69,5 +72,70 @@ describe('danh sách / số đo / người nhận', () => {
     expect(() => parseOk({ ok: true })).not.toThrow();
     bad(() => parseOk({ ok: false }));
     bad(() => parseOk(null));
+  });
+});
+
+describe('hợp đồng server mới: armed / recipient_count / notify_failures_24h / server_time', () => {
+  it('đọc đủ các trường mới', () => {
+    const d = parseDevice({ ...device, armed: false, recipient_count: 0, notify_failures_24h: 3 });
+    expect(d).toMatchObject({ armed: false, recipient_count: 0, notify_failures_24h: 3 });
+  });
+  it('server cũ không có các trường này: vắng mặt (KHÔNG mặc định thành số 0/true để khỏi báo sai)', () => {
+    const d = parseDevice(device);
+    expect('armed' in d).toBe(false);
+    expect('recipient_count' in d).toBe(false);
+    expect('notify_failures_24h' in d).toBe(false);
+  });
+  it('trường mới sai kiểu bị bỏ qua chứ không làm hỏng cả thiết bị', () => {
+    const d = parseDevice({ ...device, armed: 'yes', recipient_count: -1, notify_failures_24h: 1.5 });
+    expect(d.id).toBe('AUH-000001');
+    expect('armed' in d).toBe(false);
+    expect('recipient_count' in d).toBe(false);
+    expect('notify_failures_24h' in d).toBe(false);
+  });
+  it('trường thừa không lường trước bị bỏ qua', () => {
+    const d = parseDevice({ ...device, future_field: { a: 1 }, extra: [1, 2] });
+    expect(d).toEqual(device);
+  });
+  it('parseServerTime chỉ nhận Unix giây hợp lý', () => {
+    expect(parseServerTime({ server_time: 1_800_000_000 })).toBe(1_800_000_000);
+    for (const v of [{ server_time: 0 }, { server_time: 1_800_000_000_000 }, { server_time: '1800000000' }, { server_time: NaN }, {}, null, 5]) {
+      expect(parseServerTime(v)).toBeUndefined();
+    }
+  });
+});
+
+describe('chịu lỗi từng dòng, danh sách lớn', () => {
+  it('một thiết bị hỏng không làm trắng cả danh sách', () => {
+    const list = parseDeviceList({ devices: [device, { id: 5 }, { ...device, id: 'AUH-000002' }] });
+    expect(list.map((d) => d.id)).toEqual(['AUH-000001', 'AUH-000002']);
+  });
+  it('nhưng nếu TẤT CẢ dòng đều hỏng thì là phản hồi sai dạng', () => {
+    bad(() => parseDeviceList({ devices: [{ id: 5 }, null] }));
+  });
+  it('điểm đo hỏng / nhiệt độ vô lý bị loại, điểm tốt vẫn giữ', () => {
+    const r = parseReadings({
+      min_c: 2,
+      max_c: 8,
+      points: [
+        { t: 1, avg: 4, min: 3, max: 5 },
+        { t: 2, avg: 9999, min: 3, max: 5 }, // vô lý
+        { t: 3, avg: null, min: 3, max: 5 },
+        { t: 4, avg: 5, min: 4, max: 6 },
+      ],
+    });
+    expect(r.points.map((p) => p.t)).toEqual([1, 4]);
+  });
+  it('danh sách khổng lồ được cắt (giữ phần MỚI nhất)', () => {
+    const points = Array.from({ length: MAX_POINTS + 500 }, (_, i) => ({ t: i, avg: -20, min: -21, max: -19 }));
+    const r = parseReadings({ min_c: -40, max_c: -18, points });
+    expect(r.points).toHaveLength(MAX_POINTS);
+    expect(r.points[r.points.length - 1]!.t).toBe(MAX_POINTS + 499);
+    const many = Array.from({ length: 2000 }, (_, i) => ({ ...device, id: `AUH-${i}` }));
+    expect(parseDeviceList({ devices: many }).length).toBeLessThanOrEqual(500);
+  });
+  it('tên thiết bị rất dài / có ký tự lạ vẫn là chuỗi thường (chỉ hiển thị dạng văn bản)', () => {
+    const d = parseDevice({ ...device, name: '<img src=x onerror=alert(1)>'.repeat(50) });
+    expect(typeof d.name).toBe('string');
   });
 });

@@ -37,11 +37,14 @@ struct Rig {
     client = new DeviceClient(*signer, *seq, plat, http);
     up = new ReadingsUploader(*client, buf, th, plat, "1.0.0");
     plat.unix_ = 1800000000;
+    plat.mono = kMonoNow;
     plat.trusted = true;
   }
   ~Rig() { delete up; delete client; delete seq; delete signer; }
 
-  void fill(size_t n, uint32_t t0 = 1799999000) {
+  // Số đo mang giờ ĐƠN ĐIỆU; mặc định số đầu tiên cách "bây giờ" 1000 s (=> unix 1799999000 trên dây).
+  static constexpr uint32_t kMonoNow = 50000;
+  void fill(size_t n, uint32_t t0 = kMonoNow - 1000) {
     for (size_t i = 0; i < n; i++) buf.push(Reading{t0 + static_cast<uint32_t>(i) * 60, -1900});
   }
 };

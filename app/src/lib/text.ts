@@ -3,7 +3,8 @@
 // server KHÔNG chuẩn hóa nên ta đưa về NFC trước khi đếm ký tự và trước khi gửi.
 
 /** Ký tự điều khiển, ký tự vô hình (zero-width) và ký tự đổi chiều chữ (bidi) — thường do dán từ tin nhắn/web. */
-const INVISIBLE_RE = /[\u0000-\u001F\u007F-\u009F­​-‏‪-‮⁠-⁤⁦-⁩﻿]/g;
+// Giữ ZWJ/ZWNJ (U+200C/U+200D) nằm GIỮA hai ký tự vì emoji ghép và một số chữ cần chúng; chỉ bỏ khi đứng đầu/cuối/cạnh dấu cách (xem cleanText).
+const INVISIBLE_RE = /[\u0000-\u001F\u007F-\u009F­​‎‏‪-‮⁠-⁤⁦-⁩﻿]/g;
 
 /** Server giới hạn tên tối đa 60 ký tự, đếm theo đơn vị UTF-16 của JavaScript (biểu tượng cảm xúc = 2). */
 export const NAME_MAX = 60;
@@ -31,6 +32,7 @@ export function cleanText(raw: string): string {
   return dropLoneSurrogates(raw.normalize('NFC'))
     .replace(/\s+/g, ' ')
     .replace(INVISIBLE_RE, '')
+    .replace(/(^|\s)[\u200C\u200D]+|[\u200C\u200D]+(?=$|\s)/g, '$1') // ZWJ/ZWNJ lẻ loi
     .replace(/ {2,}/g, ' ')
     .trim();
 }

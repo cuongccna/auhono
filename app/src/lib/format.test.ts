@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { formatAgo, formatTemp, formatTempShort, formatVnDate, formatVnDateTime, formatVnTime } from './format.ts';
 
 describe('giờ Việt Nam (UTC+7)', () => {
@@ -27,5 +27,29 @@ describe('định dạng số', () => {
     expect(formatAgo(1000, 1000 - 5 * 60)).toBe('5 phút trước');
     expect(formatAgo(10000, 10000 - 3 * 3600)).toBe('3 giờ trước');
     expect(formatAgo(500000, 500000 - 2 * 86400)).toBe('2 ngày trước');
+  });
+});
+
+describe('định dạng cho người Việt, không phụ thuộc locale của điện thoại', () => {
+  it('dấu phẩy thập phân, không bao giờ ra "-0,0"', () => {
+    expect(formatTemp(-18.5)).toBe('-18,5°C');
+    expect(formatTemp(-0.04)).toBe('0,0°C');
+    expect(formatTemp(-12)).toBe('-12,0°C');
+    expect(formatTempShort(2.5)).toBe('2,5°');
+    expect(formatTempShort(-20)).toBe('-20°');
+  });
+  it('formatAgo: số đo ở tương lai (đồng hồ thiết bị nhanh) không ra số âm', () => {
+    expect(formatAgo(1000, 1500)).toBe('vừa xong');
+  });
+  it('giờ VN đúng khi múi giờ của máy là nơi khác', () => {
+    try {
+      const t = Date.UTC(2026, 8, 29, 17, 30) / 1000;
+      for (const tz of ['America/Los_Angeles', 'Asia/Kolkata', 'Pacific/Auckland']) {
+        vi.stubEnv('TZ', tz);
+        expect(formatVnDateTime(t)).toBe('00:30 30/09');
+      }
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });

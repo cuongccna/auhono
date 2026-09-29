@@ -17,6 +17,7 @@ enum class ReplyKind : uint8_t {
   Unauthorized,  // 401 khác (sai khóa / bị thu hồi)
   TooLarge,      // 413
   BadRequest,    // 400
+  RateLimited,   // 429 (kể cả trang chặn "Error 1015" của Cloudflare): server bảo chậm lại
   ServerError,   // 5xx
   NetworkError,  // status <= 0: không kết nối được / timeout
   Unknown,       // mã khác, hoặc 200 nhưng body không đúng (vd. trang đăng nhập Wi-Fi công cộng)

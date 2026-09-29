@@ -105,7 +105,7 @@ export const ERROR_MESSAGE: Record<ErrorCode, string> = {
   timeout: 'Mạng đang chậm, chưa nhận được phản hồi. Bạn thử lại nhé.',
   bad_response:
     'Nhận được dữ liệu lạ. Có thể Wi-Fi đang đòi đăng nhập (quán cà phê, khách sạn) hoặc hệ thống đang bảo trì. Bạn thử đổi sang 4G hoặc thử lại sau.',
-  aborted: 'Đã hủy.',
+  aborted: 'Thao tác đã bị hủy.',
   unknown: 'Có lỗi xảy ra. Bạn thử lại nhé.',
 };
 

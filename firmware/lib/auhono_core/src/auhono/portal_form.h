@@ -33,8 +33,19 @@ FormError validatePassword(const std::string& password);
 /// Thông báo tiếng Việt cho người dùng ("" nếu None).
 const char* formErrorText(FormError e);
 
-/// Ô nhập tay ưu tiên hơn danh sách chọn (mạng ẩn không có trong danh sách quét).
-std::string pickSsid(const std::string& typed, const std::string& picked);
+/// Mã hóa SSID (byte thô) thành chuỗi hex để đặt vào <option value>: đúng từng byte kể cả SSID không phải UTF-8
+/// (Windows-1258, GBK...) mà trình duyệt không gửi lại nguyên vẹn nếu để dạng chữ, và không thể chứa ký tự nguy hiểm.
+std::string ssidToken(const std::string& ssid);
+/// Giải mã ngược, CHẶT: hex hợp lệ, độ dài chẵn, 1..32 byte. false nếu sai.
+bool ssidFromToken(const std::string& token, std::string& out);
+
+/// Chọn SSID: ô nhập tay (mạng ẩn / gõ tay) ưu tiên hơn danh sách chọn. `pickToken` là ssidToken() của mạng đã chọn
+/// (chuỗi rỗng = chưa chọn). false nếu cả hai đều trống hoặc token hỏng.
+bool resolveSsid(const std::string& typed, const std::string& pickToken, std::string& out);
+
+/// Bản dùng để HIỂN THỊ: byte không phải UTF-8 hợp lệ (quá dài/mồ côi/surrogate/>U+10FFFF) thay bằng '?'.
+/// Không dùng để kết nối (khi kết nối luôn dùng byte gốc).
+std::string sanitizeUtf8(const std::string& in);
 
 /// Tên Wi-Fi cấu hình: "Auhono-" + 4 ký tự cuối của mã thiết bị ("AUH-000001" -> "Auhono-0001").
 /// Mã rỗng/quá ngắn -> "Auhono-0000".

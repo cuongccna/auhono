@@ -31,11 +31,13 @@ struct FakeRandom : auhono::IRandom {
 
 struct FakePlatform : auhono::IPlatform {
   uint32_t ms = 0;
+  uint32_t mono = 0;   // giây từ lúc khởi động (đơn điệu)
   uint32_t unix_ = 0;
   bool trusted = false;
   int wdtFeeds = 0;
   int setUnixCalls = 0;
   uint32_t millis() override { return ms; }
+  uint32_t monoSeconds() override { return mono; }
   uint32_t unixNow() override { return unix_; }
   bool clockTrusted() override { return trusted; }
   void setUnix(uint32_t t) override { unix_ = t; trusted = true; ++setUnixCalls; }

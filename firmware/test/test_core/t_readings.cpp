@@ -149,7 +149,9 @@ static void test_format_centi() {
   TEST_ASSERT_EQUAL_UINT(0, formatCenti(-1950, tiny, sizeof tiny));  // bộ đệm quá nhỏ
 }
 
-static std::string body(const char* fw, const Reading* r, size_t n) {
+static WireReading W(uint32_t t, int16_t c) { return WireReading{t, c}; }
+
+static std::string body(const char* fw, const WireReading* r, size_t n) {
   char buf[1024];
   size_t len = buildReadingsBody(buf, sizeof buf, fw, r, n);
   TEST_ASSERT_TRUE(len > 0);
@@ -158,21 +160,21 @@ static std::string body(const char* fw, const Reading* r, size_t n) {
 }
 
 static void test_body_matches_protocol_vector_bytes() {
-  const Reading r = R(1800000000u, -1950);
+  const WireReading r = W(1800000000u, -1950);
   // Khớp từng byte với body trong docs/PROTOCOL.md (không có "fw").
   TEST_ASSERT_EQUAL_STRING("{\"readings\":[{\"t\":1800000000,\"c\":-19.5}]}", body(nullptr, &r, 1).c_str());
   TEST_ASSERT_EQUAL_STRING("{\"readings\":[{\"t\":1800000000,\"c\":-19.5}]}", body("", &r, 1).c_str());
 }
 
 static void test_body_with_fw_and_multiple_readings() {
-  const Reading r[] = {R(1800000000u, -1950), R(1800000060u, -1900), R(1800000120u, 405)};
+  const WireReading r[] = {W(1800000000u, -1950), W(1800000060u, -1900), W(1800000120u, 405)};
   TEST_ASSERT_EQUAL_STRING(
       "{\"fw\":\"1.0.0\",\"readings\":[{\"t\":1800000000,\"c\":-19.5},{\"t\":1800000060,\"c\":-19.0},{\"t\":1800000120,\"c\":4.05}]}",
       body("1.0.0", r, 3).c_str());
 }
 
 static void test_body_sanitizes_fw_and_bounds() {
-  const Reading r = R(1800000000u, 0);
+  const WireReading r = W(1800000000u, 0);
   // Ký tự có thể phá JSON (nháy kép, gạch chéo ngược, xuống dòng) bị thay bằng '_'.
   const std::string b = body("a\"b\nc\\d", &r, 1);
   TEST_ASSERT_TRUE(b.find("\"fw\":\"a_b_c_d\"") != std::string::npos);
@@ -184,7 +186,7 @@ static void test_body_sanitizes_fw_and_bounds() {
 
 static void test_body_rejects_bad_sizes() {
   char buf[1024];
-  const Reading many[21] = {};
+  const WireReading many[21] = {};
   TEST_ASSERT_EQUAL_UINT(0, buildReadingsBody(buf, sizeof buf, "1", many, 0));
   TEST_ASSERT_EQUAL_UINT(0, buildReadingsBody(buf, sizeof buf, "1", many, 21));
   char small[20];
@@ -193,8 +195,8 @@ static void test_body_rejects_bad_sizes() {
 }
 
 static void test_body_worst_case_fits_server_limit() {
-  Reading many[20];
-  for (int i = 0; i < 20; i++) many[i] = R(4294967295u, -5500);
+  WireReading many[20];
+  for (int i = 0; i < 20; i++) many[i] = W(4294967295u, -5500);
   char buf[1024];
   const size_t len = buildReadingsBody(buf, sizeof buf, "1.10.100-rc1+build", many, 20);
   TEST_ASSERT_TRUE(len > 0 && len < 4096);

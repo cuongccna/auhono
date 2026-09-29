@@ -57,8 +57,11 @@ static void test_form_error_texts_are_vietnamese_and_nonempty() {
 }
 
 static void test_pick_ssid_prefers_typed() {
-  TEST_ASSERT_EQUAL_STRING("Hidden", pickSsid("Hidden", "Listed").c_str());
-  TEST_ASSERT_EQUAL_STRING("Listed", pickSsid("", "Listed").c_str());
+  std::string out;
+  TEST_ASSERT_TRUE(resolveSsid("Hidden", ssidToken("Listed"), out));
+  TEST_ASSERT_EQUAL_STRING("Hidden", out.c_str());
+  TEST_ASSERT_TRUE(resolveSsid("", ssidToken("Listed"), out));
+  TEST_ASSERT_EQUAL_STRING("Listed", out.c_str());
 }
 
 static void test_ap_ssid_and_device_id() {

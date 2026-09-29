@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { AppError, ERROR_MESSAGE, errorMessage, mapHttpError, needsAuth, type ErrorCode } from './errors.ts';
+import { AppError, ERROR_MESSAGE, errorMessage, isAborted, isAmbiguous, mapHttpError, needsAuth, type ErrorCode } from './errors.ts';
 
 describe('mapHttpError', () => {
   it.each([
@@ -68,5 +68,44 @@ describe('needsAuth', () => {
     expect(needsAuth(new AppError('unauthorized'))).toBe(true);
     expect(needsAuth(new AppError('network'))).toBe(false);
     expect(needsAuth(new Error('x'))).toBe(false);
+  });
+});
+
+describe('hợp đồng server mới', () => {
+  it('429 too_many_attempts (nhập sai mã nhiều lần) => thông điệp riêng, không nhầm với rate_limited', () => {
+    const e = mapHttpError(429, { error: 'too_many_attempts' });
+    expect(e.code).toBe('too_many_attempts');
+    expect(errorMessage(e)).toContain('sai mã quá nhiều lần');
+    expect(mapHttpError(429, null).code).toBe('rate_limited');
+    expect(mapHttpError(429, { error: 'rate_limited' }).code).toBe('rate_limited');
+  });
+
+  it('503 auth_unavailable = Zalo đang bận: sự cố TẠM THỜI, KHÔNG phải token sai', () => {
+    const e = mapHttpError(503, { error: 'auth_unavailable' });
+    expect(e.code).toBe('auth_unavailable');
+    expect(e.status).toBe(503);
+    expect(needsAuth(e)).toBe(false); // không hiện nút "Cho phép", không chạy luồng xin quyền lại
+    expect(errorMessage(e)).toBe('Zalo đang bận, chưa kiểm tra được tài khoản của bạn. Bạn thử lại sau ít phút nhé.');
+    // 401 unauthorized thật vẫn cần cấp quyền
+    expect(needsAuth(mapHttpError(401, { error: 'unauthorized' }))).toBe(true);
+    // 503 không kèm mã (proxy) chỉ là lỗi hệ thống chung, cũng không phải lỗi token
+    expect(needsAuth(mapHttpError(503, null))).toBe(false);
+  });
+
+  it('isAmbiguous: lỗi mà thao tác GHI có thể đã thành công phía server', () => {
+    expect(isAmbiguous(new AppError('network'))).toBe(true);
+    expect(isAmbiguous(new AppError('timeout'))).toBe(true);
+    expect(isAmbiguous(new AppError('bad_response', 200))).toBe(true);
+    expect(isAmbiguous(new AppError('internal', 502))).toBe(true);
+    expect(isAmbiguous(new AppError('invalid_code', 404))).toBe(false);
+    expect(isAmbiguous(new AppError('bad_request', 400))).toBe(false);
+    expect(isAmbiguous(new AppError('auth_unavailable', 503))).toBe(false); // server chưa xử lý gì
+    expect(isAmbiguous(new Error('x'))).toBe(false);
+  });
+
+  it('isAborted; server không thể "tiêm" mã aborted', () => {
+    expect(isAborted(new AppError('aborted'))).toBe(true);
+    expect(isAborted(new AppError('network'))).toBe(false);
+    expect(mapHttpError(400, { error: 'aborted' }).code).toBe('bad_request');
   });
 });

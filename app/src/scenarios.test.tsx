@@ -10,6 +10,9 @@ const sdk = vi.hoisted(() => ({
   scanQr: vi.fn(async () => ({ status: 'cancelled' }) as unknown),
   askCameraPermission: vi.fn(async () => true),
   dark: false,
+  openTelegramLink: vi.fn(async (_u: string) => true),
+  shareText: vi.fn(async (_t: string) => true),
+  copyText: vi.fn(async (_t: string) => true),
 }));
 vi.mock('./sdk.ts', () => ({
   getToken: async () => sdk.token,
@@ -18,6 +21,9 @@ vi.mock('./sdk.ts', () => ({
   scanQr: () => sdk.scanQr(),
   askCameraPermission: () => sdk.askCameraPermission(),
   isZaloDarkTheme: () => sdk.dark,
+  openTelegramLink: (u: string) => sdk.openTelegramLink(u),
+  shareText: (t: string) => sdk.shareText(t),
+  copyText: (t: string) => sdk.copyText(t),
 }));
 
 import Root from './components/app.tsx';
@@ -36,6 +42,8 @@ let skew = 0; // giây: server - điện thoại
 const phoneNow = () => Math.floor(Date.now() / 1000);
 const serverNow = () => phoneNow() + skew;
 
+let telegramAvailable: boolean | undefined; // undefined = server cũ (không có trường)
+const TG_URL = 'https://t.me/AuhonoBot?start=tok_ABC-123';
 let devices: Json[];
 let recipients: Json[];
 let readings: () => Json;
@@ -62,7 +70,20 @@ const makeReadings = (temps: number[] = Array.from({ length: 12 }, () => -20)) =
 function defaultHandler(c: Call): Response {
   if (c.url === '/v1/devices' && c.method === 'GET') return jsonRes({ server_time: serverNow(), devices });
   if (c.url.startsWith(`/v1/devices/${ID}/readings`)) return jsonRes(readings());
-  if (c.url === `/v1/devices/${ID}/recipients` && c.method === 'GET') return jsonRes({ recipients });
+  if (c.url === `/v1/devices/${ID}/recipients` && c.method === 'GET') {
+    return jsonRes(telegramAvailable === undefined ? { recipients } : { telegram_available: telegramAvailable, recipients });
+  }
+  if (/\/recipients\/\d+\/telegram-link$/.test(c.url) && c.method === 'POST') return jsonRes({ url: TG_URL, expires_at: serverNow() + 86400 });
+  if (/\/recipients\/\d+\/telegram$/.test(c.url) && c.method === 'DELETE') {
+    const rid = Number(c.url.split('/').slice(-2)[0]);
+    recipients = recipients.map((r) => (r.id === rid ? { ...r, telegram_linked: false, mode: 'zns' } : r));
+    return jsonRes({ ok: true });
+  }
+  if (/\/recipients\/\d+$/.test(c.url) && c.method === 'PATCH') {
+    const rid = Number(c.url.split('/').pop());
+    recipients = recipients.map((r) => (r.id === rid ? { ...r, mode: c.body.mode } : r));
+    return jsonRes({ ok: true });
+  }
   if (c.url === `/v1/devices/${ID}/recipients` && c.method === 'POST') {
     recipients.push({ id: recipients.length + 1, ...c.body });
     return jsonRes({ id: recipients.length, ...c.body }, 201);
@@ -97,6 +118,10 @@ beforeEach(() => {
   calls = [];
   override = null;
   devices = [makeDevice()];
+  telegramAvailable = undefined;
+  sdk.openTelegramLink.mockClear().mockResolvedValue(true);
+  sdk.shareText.mockClear().mockResolvedValue(true);
+  sdk.copyText.mockClear().mockResolvedValue(true);
   recipients = [{ id: 1, name: 'Vợ', phone: '84912345678' }];
   readings = makeReadings();
   sdk.token = 'tok-0123456789';
@@ -1016,5 +1041,252 @@ describe('người nhận chính và lịch nhắc', () => {
     expect(help.textContent).toContain('sau 2 giờ, rồi cách 6, 12 giờ');
     expect(help.textContent).toContain('người nhận chính');
     expect(help.textContent).toContain('Đã biết, đang xử lý');
+  });
+});
+
+// ───────────────────────────── Telegram ─────────────────────────────
+
+const TG = 'Nhận thêm qua Telegram (miễn phí)';
+const linkedRec = (mode: string, over: Json = {}) => ({ id: 1, name: 'Vợ', phone: '84912345678', mode, telegram_linked: true, ...over });
+const unlinkedRec = (over: Json = {}) => ({ id: 1, name: 'Vợ', phone: '84912345678', mode: 'zns', telegram_linked: false, ...over });
+
+describe('Telegram: hiện/ẩn', () => {
+  it('telegram_available = false: ẩn mọi giao diện Telegram', async () => {
+    telegramAvailable = false;
+    recipients = [unlinkedRec()];
+    open(`/device/${ID}/recipients`);
+    await t('Vợ');
+    expect(screen.queryByText(TG)).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Kết nối Telegram' })).toBeNull();
+    expect(screen.queryByText(/Telegram miễn phí/)).toBeNull();
+  });
+
+  it('server cũ (không có telegram_available): ẩn', async () => {
+    telegramAvailable = undefined;
+    open(`/device/${ID}/recipients`);
+    await t('Vợ');
+    expect(screen.queryByText(TG)).toBeNull();
+  });
+
+  it('có Telegram: hiện dòng cho MỖI người nhận + trợ giúp về lợi ích và người nhận chính', async () => {
+    telegramAvailable = true;
+    recipients = [unlinkedRec(), unlinkedRec({ id: 2, name: 'Quản lý', phone: '84987654321' })];
+    open(`/device/${ID}/recipients`);
+    await t('Quản lý');
+    expect(screen.getAllByText(TG)).toHaveLength(2);
+    expect(screen.getAllByRole('button', { name: 'Kết nối Telegram' })).toHaveLength(2);
+    expect(screen.getByText(/Telegram miễn phí và là kênh dự phòng/)).toBeTruthy();
+    expect(screen.getByText(/chỉ người nhận chính nhận tin nhắc lại qua Zalo/)).toBeTruthy();
+  });
+});
+
+describe('Telegram: chưa kết nối', () => {
+  beforeEach(() => {
+    telegramAvailable = true;
+    recipients = [unlinkedRec()];
+  });
+
+  it('bấm "Kết nối Telegram": POST telegram-link, hiện liên kết + ghi chú một lần/24 giờ + hướng dẫn; KHÔNG tự mở trên máy chủ quán', async () => {
+    open(`/device/${ID}/recipients`);
+    fireEvent.click(await screen.findByRole('button', { name: 'Kết nối Telegram' }));
+    await waitFor(() => expect(callsTo('POST', `/v1/devices/${ID}/recipients/1/telegram-link`)).toHaveLength(1));
+    expect((await screen.findByTestId('telegram-link')).textContent).toBe(TG_URL);
+    expect(screen.getByText(/Liên kết chỉ dùng được một lần và có hiệu lực 24 giờ\./)).toBeTruthy();
+    expect(screen.getByText(/phải được mở trên điện thoại của/)).toBeTruthy();
+    expect(screen.getByText('Mở Telegram, bấm Start. Sau đó quay lại đây và làm mới.')).toBeTruthy();
+    expect(sdk.openTelegramLink).not.toHaveBeenCalled(); // mở trên máy chủ quán sẽ nhầm người và tiêu hao liên kết dùng một lần
+  });
+
+  it('"Mở Telegram trên máy này" gọi hàm mở ngoài của SDK với đúng URL', async () => {
+    open(`/device/${ID}/recipients`);
+    fireEvent.click(await screen.findByRole('button', { name: 'Kết nối Telegram' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Mở Telegram trên máy này' }));
+    await waitFor(() => expect(sdk.openTelegramLink).toHaveBeenCalledWith(TG_URL));
+    expect(await t(/Đã mở Telegram/)).toBeTruthy();
+  });
+
+  it('không mở được: hướng dẫn sao chép liên kết', async () => {
+    sdk.openTelegramLink.mockResolvedValue(false);
+    open(`/device/${ID}/recipients`);
+    fireEvent.click(await screen.findByRole('button', { name: 'Kết nối Telegram' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Mở Telegram trên máy này' }));
+    expect(await t(/Không mở được Telegram tự động/)).toBeTruthy();
+    expect(screen.getByTestId('telegram-link').textContent).toBe(TG_URL); // vẫn thấy liên kết để làm tay
+  });
+
+  it('"Sao chép liên kết" và "Chia sẻ liên kết"', async () => {
+    open(`/device/${ID}/recipients`);
+    fireEvent.click(await screen.findByRole('button', { name: 'Kết nối Telegram' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Sao chép liên kết' }));
+    await waitFor(() => expect(sdk.copyText).toHaveBeenCalledWith(TG_URL));
+    expect(await t('Đã sao chép liên kết.')).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Chia sẻ liên kết' }));
+    await waitFor(() => expect(sdk.shareText).toHaveBeenCalledTimes(1));
+    const shared = sdk.shareText.mock.calls[0]![0];
+    expect(shared).toContain(TG_URL);
+    expect(shared).toContain('Vợ');
+    expect(shared).toContain('24 giờ');
+  });
+
+  it('không có bảng chia sẻ: sao chép lời nhắn thay thế', async () => {
+    sdk.shareText.mockResolvedValue(false);
+    open(`/device/${ID}/recipients`);
+    fireEvent.click(await screen.findByRole('button', { name: 'Kết nối Telegram' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Chia sẻ liên kết' }));
+    await waitFor(() => expect(sdk.copyText).toHaveBeenCalled());
+    expect(sdk.copyText.mock.calls[0]![0]).toContain(TG_URL);
+    expect(await t(/Đã sao chép lời nhắn/)).toBeTruthy();
+  });
+
+  it('bấm "Kết nối Telegram" đúp chỉ tạo MỘT liên kết', async () => {
+    open(`/device/${ID}/recipients`);
+    const btn = await screen.findByRole('button', { name: 'Kết nối Telegram' });
+    fireEvent.click(btn);
+    fireEvent.click(btn);
+    fireEvent.click(btn);
+    await screen.findByTestId('telegram-link');
+    expect(callsTo('POST', /telegram-link$/)).toHaveLength(1);
+  });
+
+  it('503 telegram_not_configured: thông báo dễ hiểu, không có bảng liên kết', async () => {
+    override = (c) => (c.url.endsWith('/telegram-link') ? jsonRes({ error: 'telegram_not_configured' }, 503) : undefined);
+    open(`/device/${ID}/recipients`);
+    fireEvent.click(await screen.findByRole('button', { name: 'Kết nối Telegram' }));
+    expect(await t(/Kênh Telegram chưa được bật/)).toBeTruthy();
+    expect(screen.queryByTestId('telegram-link')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Cho phép' })).toBeNull(); // không phải lỗi token
+  });
+
+  it('server trả URL KHÔNG phải t.me: bị từ chối (bad_response), không hiện, không mở', async () => {
+    override = (c) => (c.url.endsWith('/telegram-link') ? jsonRes({ url: 'https://evil.example/?start=abc', expires_at: serverNow() + 86400 }) : undefined);
+    open(`/device/${ID}/recipients`);
+    fireEvent.click(await screen.findByRole('button', { name: 'Kết nối Telegram' }));
+    expect(await t(/Nhận được dữ liệu lạ/)).toBeTruthy();
+    expect(screen.queryByTestId('telegram-link')).toBeNull();
+    expect(sdk.openTelegramLink).not.toHaveBeenCalled();
+    expect(document.body.textContent).not.toContain('evil.example');
+  });
+
+  it('quay lại app (visibilitychange) khi đang có liên kết chờ: tự tải lại và thấy "Đã kết nối Telegram"', async () => {
+    open(`/device/${ID}/recipients`);
+    fireEvent.click(await screen.findByRole('button', { name: 'Kết nối Telegram' }));
+    await screen.findByTestId('telegram-link');
+    recipients = [linkedRec('both')]; // người nhận đã bấm Start
+    document.dispatchEvent(new Event('visibilitychange'));
+    expect(await t('Đã kết nối Telegram')).toBeTruthy();
+    expect(screen.queryByTestId('telegram-link')).toBeNull(); // bảng liên kết tự đóng
+  });
+
+  it('nút Làm mới trong bảng liên kết tải lại danh sách', async () => {
+    open(`/device/${ID}/recipients`);
+    fireEvent.click(await screen.findByRole('button', { name: 'Kết nối Telegram' }));
+    await screen.findByTestId('telegram-link');
+    const before = callsTo('GET', `/v1/devices/${ID}/recipients`).length;
+    fireEvent.click(screen.getByRole('button', { name: 'Làm mới' }));
+    await waitFor(() => expect(callsTo('GET', `/v1/devices/${ID}/recipients`).length).toBeGreaterThan(before));
+  });
+});
+
+describe('Telegram: đã kết nối', () => {
+  beforeEach(() => {
+    telegramAvailable = true;
+  });
+  const pressed = () => screen.getAllByRole('button', { pressed: true }).map((b) => b.textContent);
+
+  it.each([
+    ['both', 'Zalo + Telegram'],
+    ['telegram', 'Chỉ Telegram'],
+    ['zns', 'Chỉ Zalo'],
+  ])('mode %s: huy hiệu "Đã kết nối Telegram" và lựa chọn "%s" được chọn', async (mode, label) => {
+    recipients = [linkedRec(mode)];
+    open(`/device/${ID}/recipients`);
+    expect(await t('Đã kết nối Telegram')).toBeTruthy();
+    const group = screen.getByRole('group', { name: /Kênh nhận tin của Vợ/ });
+    expect(within(group).getAllByRole('button').map((b) => b.textContent)).toEqual(['Zalo + Telegram', 'Chỉ Telegram', 'Chỉ Zalo']);
+    expect(pressed()).toEqual([label]);
+    expect(screen.getByRole('button', { name: 'Ngắt kết nối' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Kết nối Telegram' })).toBeNull();
+  });
+
+  it('chọn "Chỉ Zalo" và "Zalo + Telegram": PATCH {mode} ngay, không hỏi', async () => {
+    recipients = [linkedRec('telegram')];
+    open(`/device/${ID}/recipients`);
+    fireEvent.click(await screen.findByRole('button', { name: 'Chỉ Zalo' }));
+    await waitFor(() => expect(callsTo('PATCH', `/v1/devices/${ID}/recipients/1`)).toHaveLength(1));
+    expect(callsTo('PATCH', `/v1/devices/${ID}/recipients/1`)[0]!.body).toEqual({ mode: 'zns' });
+    await waitFor(() => expect(pressed()).toEqual(['Chỉ Zalo']));
+    fireEvent.click(screen.getByRole('button', { name: 'Zalo + Telegram' }));
+    await waitFor(() => expect(callsTo('PATCH', `/v1/devices/${ID}/recipients/1`)).toHaveLength(2));
+    expect(callsTo('PATCH', `/v1/devices/${ID}/recipients/1`)[1]!.body).toEqual({ mode: 'both' });
+  });
+
+  it('chọn "Chỉ Telegram": cảnh báo bắt buộc, chỉ gửi khi xác nhận', async () => {
+    recipients = [linkedRec('both')];
+    open(`/device/${ID}/recipients`);
+    fireEvent.click(await screen.findByRole('button', { name: 'Chỉ Telegram' }));
+    const dialog = await screen.findByRole('dialog');
+    expect(dialog.textContent).toContain('Người này sẽ không nhận tin Zalo. Nếu tắt Telegram hoặc chặn bot, họ sẽ không nhận được gì.');
+    expect(callsTo('PATCH', `/v1/devices/${ID}/recipients/1`)).toHaveLength(0);
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Không' }));
+    await new Promise((r) => setTimeout(r, 30));
+    expect(callsTo('PATCH', `/v1/devices/${ID}/recipients/1`)).toHaveLength(0);
+    fireEvent.click(within(screen.getByRole('group', { name: /Kênh nhận tin của Vợ/ })).getByRole('button', { name: 'Chỉ Telegram' }));
+    fireEvent.click(within(await screen.findByRole('dialog')).getByRole('button', { name: 'Chỉ Telegram' }));
+    await waitFor(() => expect(callsTo('PATCH', `/v1/devices/${ID}/recipients/1`)).toHaveLength(1));
+    expect(callsTo('PATCH', `/v1/devices/${ID}/recipients/1`)[0]!.body).toEqual({ mode: 'telegram' });
+  });
+
+  it('bấm lại lựa chọn đang chọn: không gửi gì', async () => {
+    recipients = [linkedRec('both')];
+    open(`/device/${ID}/recipients`);
+    fireEvent.click(await screen.findByRole('button', { name: 'Zalo + Telegram' }));
+    await new Promise((r) => setTimeout(r, 30));
+    expect(callsTo('PATCH', `/v1/devices/${ID}/recipients/1`)).toHaveLength(0);
+  });
+
+  it('409 telegram_not_linked (người nhận vừa /stop): thông báo và tự tải lại trạng thái', async () => {
+    recipients = [linkedRec('both')];
+    override = (c) => {
+      if (c.method === 'PATCH') {
+        recipients = [unlinkedRec()]; // trong lúc đó họ đã ngắt kết nối
+        return jsonRes({ error: 'telegram_not_linked' }, 409);
+      }
+      return undefined;
+    };
+    open(`/device/${ID}/recipients`);
+    fireEvent.click(await screen.findByRole('button', { name: 'Chỉ Zalo' }));
+    expect(await t(/chưa kết nối Telegram/)).toBeTruthy();
+    expect(await screen.findByRole('button', { name: 'Kết nối Telegram' })).toBeTruthy(); // trạng thái đã cập nhật
+  });
+
+  it('"Ngắt kết nối": phải xác nhận; xác nhận thì DELETE .../telegram và về trạng thái chưa kết nối', async () => {
+    recipients = [linkedRec('both')];
+    open(`/device/${ID}/recipients`);
+    fireEvent.click(await screen.findByRole('button', { name: 'Ngắt kết nối' }));
+    const dialog = await screen.findByRole('dialog');
+    expect(dialog.textContent).toContain('chỉ nhận tin qua Zalo');
+    expect(callsTo('DELETE', /telegram$/)).toHaveLength(0);
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Ngắt kết nối' }));
+    await waitFor(() => expect(callsTo('DELETE', `/v1/devices/${ID}/recipients/1/telegram`)).toHaveLength(1));
+    expect(await screen.findByRole('button', { name: 'Kết nối Telegram' })).toBeTruthy();
+  });
+
+  it('bấm xác nhận ngắt kết nối đúp chỉ gửi MỘT DELETE', async () => {
+    recipients = [linkedRec('both')];
+    open(`/device/${ID}/recipients`);
+    fireEvent.click(await screen.findByRole('button', { name: 'Ngắt kết nối' }));
+    const confirm = within(await screen.findByRole('dialog')).getByRole('button', { name: 'Ngắt kết nối' });
+    fireEvent.click(confirm);
+    fireEvent.click(confirm);
+    await waitFor(() => expect(callsTo('DELETE', /telegram$/)).toHaveLength(1));
+  });
+
+  it('đổi kênh bấm đúp nhanh chỉ gửi MỘT PATCH', async () => {
+    recipients = [linkedRec('both')];
+    open(`/device/${ID}/recipients`);
+    const btn = await screen.findByRole('button', { name: 'Chỉ Zalo' });
+    fireEvent.click(btn);
+    fireEvent.click(btn);
+    await waitFor(() => expect(callsTo('PATCH', `/v1/devices/${ID}/recipients/1`)).toHaveLength(1));
   });
 });

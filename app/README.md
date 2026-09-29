@@ -9,7 +9,7 @@
 | Chi tiết + biểu đồ 24 giờ | `/device/:id` | Biểu đồ SVG (dải ngưỡng, dải min–max, đứt đường + gạch chéo khi mất kết nối > 15 phút, hình thoi cho điểm ngoài ngưỡng, trục giờ Việt Nam), hướng dẫn cài đặt khi chưa có số đo, giải thích cách cảnh báo hoạt động, nút "Đã biết, đang xử lý" (dừng tin nhắc lại vài giờ), "Tạm dừng cảnh báo" 1/3/7/14/30 ngày + "Bật lại", gỡ thiết bị (có bước xác nhận) |
 | Đổi tên | `/device/:id/rename` | Đổi tên thiết bị (chuẩn hóa NFC, 1–60 ký tự) |
 | Đặt ngưỡng | `/device/:id/thresholds` | Hiện nhiệt độ hiện tại của tủ; chọn loại tủ có sẵn ngưỡng; mục "Nâng cao" chỉnh min/max (gõ được `-18,5`, `−18`, số toàn chiều rộng) và số phút báo (5–60); cảnh báo khi nhiệt độ hiện tại đã nằm ngoài ngưỡng định đặt |
-| Người nhận cảnh báo | `/device/:id/recipients` | Xem / thêm / xóa (tối đa 5), nhãn "Người nhận chính" cho người đầu tiên, số điện thoại di động VN tự chuẩn hóa về `84xxxxxxxxx`, chặn trùng, cảnh báo khi xóa người cuối cùng |
+| Người nhận cảnh báo | `/device/:id/recipients` | Xem / thêm / xóa (tối đa 5), nhãn "Người nhận chính" cho người đầu tiên, kênh Telegram miễn phí cho từng người (kết nối / chọn kênh / ngắt), số điện thoại di động VN tự chuẩn hóa về `84xxxxxxxxx`, chặn trùng, cảnh báo khi xóa người cuối cùng |
 
 API mà app gọi là nhóm "Chủ quán" trong `server/src/app.ts` (Bearer = Zalo access token).
 
@@ -157,6 +157,7 @@ Mọi dòng "Test" là test tự động trong Node/jsdom (SDK và `fetch` giả
 | Sự cố kéo dài, tốn tin nhắn (~220đ/tin) | Nút **"Đã biết, đang xử lý"** (POST `/ack` {hours: 4}) CHỈ hiện khi `phase` khác `ok`, chưa tạm dừng và `acked_until` trống/đã qua; sau khi bấm hiện "Đã ghi nhận, sẽ nhắc lại sau HH:mm nếu chưa xong."; 409 `no_active_alert` => thông báo riêng + tải lại; server cũ (thiếu `acked_until`) => không hiện nút | `alert-actions.test.ts`, `api-client.test.ts`, `scenarios.test.tsx` |
 | Quán nghỉ Tết / cố ý rút điện | Mục **"Tạm dừng cảnh báo"**: chọn 1/3/7/14/30 ngày, hộp thoại xác nhận "Trong thời gian này bạn sẽ KHÔNG nhận cảnh báo…"; sau đó biểu ngữ "Đang tạm dừng cảnh báo tới dd/MM" + nút "Bật lại"; trạng thái là **"Tạm dừng cảnh báo"**, KHÔNG hiện "Mất kết nối" như sự cố (cả ở màn hình chính); tạm dừng hết hạn thì tính bình thường; server cũ (thiếu `paused_until`) => ẩn mục này | `status.test.ts`, `alert-actions.test.ts`, `scenarios.test.tsx` |
 | Nhiều người nhận, nhắc lại thưa | Người đầu tiên có nhãn "Người nhận chính" + giải thích "Người đầu tiên trong danh sách nhận cả tin nhắc lại; những người khác chỉ nhận tin báo đầu và tin đã ổn."; trợ giúp nêu lịch nhắc (nhiệt độ: sau 30 phút rồi cách 2/4/8/12 giờ; mất kết nối: sau 2 giờ rồi cách 6/12 giờ). "Người đầu" được SUY từ thứ tự danh sách của server (sắp theo id) | `scenarios.test.tsx` |
+| Telegram (miễn phí, dự phòng) | Chỉ hiện khi `telegram_available === true` (vắng/false/server cũ => ẩn hết). Mỗi người có dòng "Nhận thêm qua Telegram (miễn phí)": chưa kết nối => "Kết nối Telegram" (POST `telegram-link`) hiện bảng liên kết với ghi chú "chỉ dùng một lần, hiệu lực 24 giờ", "phải mở trên điện thoại của chính người nhận", nút Chia sẻ / Sao chép / Mở Telegram trên máy này, hướng dẫn "Mở Telegram, bấm Start. Sau đó quay lại đây và làm mới."; quay lại app thì tự tải lại. Đã kết nối => huy hiệu + chọn "Zalo + Telegram" / "Chỉ Telegram" / "Chỉ Zalo" (PATCH `mode`; "Chỉ Telegram" có hộp cảnh báo bắt buộc) + "Ngắt kết nối" (xác nhận, DELETE). 503 `telegram_not_configured` và 409 `telegram_not_linked` có thông điệp riêng (không phải lỗi token). URL của server chỉ được dùng nếu đúng `https://t.me/<bot>?start=<mã>` (kiểm ở cả parser lẫn trước khi gọi `openOutApp`); URL lạ => `bad_response`, không mở | `telegram.test.ts`, `schemas.test.ts`, `errors.test.ts`, `api-client.test.ts`, `sdk.test.ts`, `security.test.ts`, `scenarios.test.tsx` |
 | Lỗi lập trình bất ngờ | `ErrorBoundary`: "Ứng dụng gặp sự cố" + nút mở lại thay vì màn hình trắng | `scenarios.test.tsx` |
 | Tên/chuỗi độc hại từ server | Chỉ hiển thị dạng chữ | `scenarios.test.tsx`, `security.test.ts` |
 
@@ -171,6 +172,8 @@ Mọi dòng "Test" là test tự động trong Node/jsdom (SDK và `fetch` giả
 | 401 `unauthorized` | Luồng xin quyền lại ("Cho phép") | — |
 | 503 `auth_unavailable` | "Zalo đang bận, thử lại sau ít phút"; giữ số cũ; KHÔNG xin quyền lại | Coi như lỗi hệ thống chung |
 | 429 `too_many_attempts` (claim) | Thông báo bị khóa (tới ~1 giờ) + nút gửi tạm khóa 30 giây | 429 chung => "thao tác hơi nhanh" |
+| `telegram_available`, `mode`, `telegram_linked` (GET `/recipients`); POST `.../recipients/:rid/telegram-link`, PATCH `.../recipients/:rid` `{mode}`, DELETE `.../recipients/:rid/telegram` | Giao diện Telegram trên màn hình người nhận | Ẩn hết |
+| 503 `telegram_not_configured`, 409 `telegram_not_linked` | "Kênh Telegram chưa được bật…"; "Người này chưa kết nối Telegram…" + tải lại | 503/409 chung |
 | 409 `no_active_alert` (ack) | "Không có sự cố nào cần ghi nhận" + tải lại | 409 chung => "Có lỗi xảy ra" |
 
 ## Chưa xác minh trong Zalo thật
@@ -186,7 +189,8 @@ Toàn bộ kiểm thử ở trên chạy trong Node/jsdom với `zmp-sdk` và `f
 - Độ chính xác hiệu chỉnh đồng hồ trên 3G thật (dùng điểm giữa lúc gửi và lúc nhận; sai số tối đa bằng nửa độ trễ khứ hồi).
 - Màu chủ đạo thật `--zaui-light-color-primary` của Zalo (test độ tương phản dùng màu dự phòng `#006af5`).
 - Origin thật của Mini App phía CORS, `Retry-After`/`Cache-Control` của Cloudflare, tin ZNS thật tới người nhận.
-- Bundle: 119,9 kB gzip cho JS (`vite build`, đo lúc viết); tải thật trên Zalo có thể khác do CDN của Zalo.
+- Telegram: `openOutApp` có thực sự mở Telegram/trình duyệt ngoài trong Zalo (Android/iOS, bản cũ) hay không; `openShareSheet({type:'text'})` có nhận đoạn chữ chứa liên kết; `navigator.clipboard`/`execCommand('copy')` trong webview Zalo; Telegram có mở đúng bot với `?start=` từ liên kết; vòng đời thật (bấm Start => `both`, `/stop` => ngắt) và việc tin thật tới Telegram.
+- Bundle: 124,3 kB gzip cho JS (`vite build`, đo lúc viết); tải thật trên Zalo có thể khác do CDN của Zalo.
 
 ## Kiểm thử thủ công trong Zalo thật (checklist)
 
@@ -227,6 +231,7 @@ trên cả Android và iOS, ít nhất một máy Zalo bản mới và một má
 **Ngưỡng & người nhận**
 - [ ] Chọn Tủ đông / Tủ mát rồi Lưu: ngưỡng mới hiện ở chi tiết thiết bị và server áp dụng.
 - [ ] "Nâng cao": nhập -18,5 (dấu phẩy), số sai, min ≥ max, phút ngoài 5–60 => báo lỗi đúng ô, không gửi lên server.
+- [ ] Telegram: "Kết nối Telegram" => "Chia sẻ liên kết" gửi được cho người khác; mở liên kết trên máy người nhận, bấm Start => quay lại app thấy "Đã kết nối Telegram"; đổi 3 kênh; "Chỉ Telegram" có cảnh báo; "Ngắt kết nối" và gửi /stop trong Telegram đều đưa về chưa kết nối; liên kết dùng lại lần 2 hoặc sau 24 giờ bị từ chối.
 - [ ] Thêm số `0912345678`, `+84 912 345 678`, `84912345678` đều thành `0912 345 678`; số bàn (`0212…`) bị từ chối.
 - [ ] Thêm người thứ 6 bị chặn với câu báo rõ; xóa một người rồi thêm lại được.
 - [ ] Thật sự nhận được tin ZNS khi tạo báo động (phụ thuộc cấu hình ZNS phía server).
@@ -241,7 +246,7 @@ trên cả Android và iOS, ít nhất một máy Zalo bản mới và một má
 
 ## Kích thước bản build
 
-`npm run build` (Vite 5, target es2015): JS **119,9 kB gzip** (383,6 kB thô), CSS 16,4 kB gzip (đo lúc viết, sau khi thêm tự làm mới, đổi tên, tạm dừng, chế độ tối...). Phần lớn là react-dom, react-router, `zmp-ui` (và `zod` do `zmp-sdk` kéo vào)
+`npm run build` (Vite 5, target es2015): JS **124,3 kB gzip** (397,7 kB thô), CSS 16,5 kB gzip (đo lúc viết, sau khi thêm tự làm mới, đổi tên, tạm dừng, Telegram, chế độ tối...). Phần lớn là react-dom, react-router, `zmp-ui` (và `zod` do `zmp-sdk` kéo vào)
 cùng toàn bộ `zaui.css` (import nguyên tệp; có thể thu nhỏ sau bằng cách chỉ nạp phần CSS của các component đang dùng). Ngân sách đặt ra: JS gzip dưới ~130 kB.
 
 ## Hạn chế và việc còn lại

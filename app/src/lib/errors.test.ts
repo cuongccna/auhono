@@ -121,3 +121,21 @@ describe('ack / pause', () => {
     expect(errorMessage(new AppError('too_many_attempts'))).toContain('1 giờ');
   });
 });
+
+describe('Telegram', () => {
+  it('503 telegram_not_configured: mã riêng, không phải lỗi token, không xin quyền lại', () => {
+    const err = mapHttpError(503, { error: 'telegram_not_configured' });
+    expect(err.code).toBe('telegram_not_configured');
+    expect(needsAuth(err)).toBe(false);
+    expect(errorMessage(err)).toContain('Telegram chưa được bật');
+  });
+  it('409 telegram_not_linked: thông điệp bảo kết nối lại', () => {
+    const err = mapHttpError(409, { error: 'telegram_not_linked' });
+    expect(err.code).toBe('telegram_not_linked');
+    expect(errorMessage(err)).toContain('chưa kết nối Telegram');
+    expect(isAmbiguous(err)).toBe(false);
+  });
+  it('400 (mode sai) => bad_request chung', () => {
+    expect(mapHttpError(400, { error: 'bad_request' }).code).toBe('bad_request');
+  });
+});

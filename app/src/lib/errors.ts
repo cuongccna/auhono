@@ -6,6 +6,8 @@ export type ErrorCode =
   | 'bad_range'
   | 'too_many_recipients'
   | 'not_found'
+  | 'telegram_not_configured' // server chưa bật Telegram (503)
+  | 'telegram_not_linked' // đổi kênh sang Telegram khi người nhận chưa kết nối (409)
   | 'no_active_alert' // bấm "Đã biết" khi không có sự cố nào (đã ổn trong lúc chờ)
   | 'invalid_code'
   | 'unauthorized'
@@ -28,6 +30,8 @@ const SERVER_CODES: ReadonlySet<string> = new Set<ErrorCode>([
   'too_many_recipients',
   'not_found',
   'no_active_alert',
+  'telegram_not_configured',
+  'telegram_not_linked',
   'invalid_code',
   'unauthorized',
   'too_large',
@@ -98,6 +102,8 @@ export const ERROR_MESSAGE: Record<ErrorCode, string> = {
   too_many_recipients: 'Mỗi thiết bị chỉ có tối đa 5 người nhận cảnh báo. Hãy xóa bớt một người rồi thêm lại.',
   not_found: 'Không tìm thấy thiết bị này. Có thể thiết bị đã được gỡ khỏi tài khoản của bạn.',
   // Cố ý chung chung: server không cho biết mã sai hay thiết bị đã có chủ (để không lộ thông tin của người khác).
+  telegram_not_configured: 'Kênh Telegram chưa được bật trên hệ thống. Bạn liên hệ nơi bán để được hỗ trợ nhé.',
+  telegram_not_linked: 'Người này chưa kết nối Telegram (có thể họ đã ngắt kết nối). Bạn kết nối lại rồi thử nhé.',
   no_active_alert: 'Hiện không có sự cố nào cần ghi nhận: tủ có thể đã ổn trở lại. Bạn thử làm mới nhé.',
   invalid_code:
     'Mã không đúng, hoặc thiết bị này đang thuộc tài khoản khác. Bạn kiểm tra lại mã in trên hộp. Nếu là thiết bị đã qua sử dụng, hãy nhờ chủ cũ vào "Chi tiết thiết bị > Gỡ thiết bị" trước, hoặc liên hệ nơi bán.',

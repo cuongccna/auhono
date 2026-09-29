@@ -21,7 +21,7 @@ describe('rà soát mã nguồn (bảo mật)', () => {
     ['eval / new Function / setTimeout(chuỗi)', /\beval\s*\(|new\s+Function\s*\(|set(Timeout|Interval)\(\s*['"`]/],
     ['console.*', /\bconsole\s*\./],
     ['localStorage / sessionStorage / indexedDB / cookie', /\b(localStorage|sessionStorage|indexedDB)\b|document\.cookie/],
-    ['mở/điều hướng URL tự do', /window\.open|location\.(href|assign|replace)\s*[=(]|openWebview|openOutApp|openMiniApp|openShareSheet/],
+    ['mở/điều hướng URL tự do', /window\.open|location\.(href|assign|replace)\s*[=(]|openWebview|openMiniApp/],
     ['sendBeacon / XMLHttpRequest / WebSocket (chỉ được dùng fetch của api-client)', /sendBeacon|XMLHttpRequest|new\s+WebSocket/],
   ])('không dùng %s', (_name, re) => {
     expect(offenders(re)).toEqual([]);
@@ -51,10 +51,24 @@ describe('rà soát mã nguồn (bảo mật)', () => {
   });
 
   it('chỉ import những hàm zmp-sdk đã được xem xét', () => {
-    const allowed = new Set(['authorize', 'checkZaloCameraPermission', 'getAccessToken', 'getSystemInfo', 'openPermissionSetting', 'requestCameraPermission', 'scanQRCode']);
+    const allowed = new Set(['authorize', 'checkZaloCameraPermission', 'getAccessToken', 'getSystemInfo', 'openOutApp', 'openPermissionSetting', 'openShareSheet', 'requestCameraPermission', 'scanQRCode']);
     const imports = source.flatMap(([, t]) => [...t.matchAll(/import\s*\{([^}]*)\}\s*from\s*'zmp-sdk'/g)].flatMap((m) => m[1]!.split(',').map((x) => x.trim()).filter(Boolean)));
     expect(imports.length).toBeGreaterThan(0);
     for (const name of imports) expect(allowed.has(name), name).toBe(true);
+  });
+});
+
+describe('mở liên kết ra ngoài (Telegram)', () => {
+  it('openOutApp chỉ được gọi trong sdk.ts, và chỉ sau khi kiểm tra isTelegramUrl', () => {
+    expect(offenders(/\bopenOutApp\b/)).toEqual(['./sdk.ts']);
+    const sdk = source.find(([p]) => p === './sdk.ts')![1];
+    const fn = sdk.slice(sdk.indexOf('export async function openTelegramLink'));
+    expect(fn.indexOf('isTelegramUrl(url)')).toBeGreaterThan(-1);
+    expect(fn.indexOf('isTelegramUrl(url)')).toBeLessThan(fn.indexOf('openOutApp('));
+  });
+  it('openShareSheet chỉ trong sdk.ts và chỉ chia sẻ dạng chữ', () => {
+    expect(offenders(/\bopenShareSheet\b/)).toEqual(['./sdk.ts']);
+    expect(source.find(([p]) => p === './sdk.ts')![1]).toContain("type: 'text'");
   });
 });
 

@@ -6,11 +6,14 @@ import {
   checkZaloCameraPermission,
   getAccessToken,
   getSystemInfo,
+  openOutApp,
   openPermissionSetting,
+  openShareSheet,
   requestCameraPermission,
   scanQRCode,
 } from 'zmp-sdk';
 import { AppError } from './lib/errors.ts';
+import { isTelegramUrl } from './lib/telegram.ts';
 
 /**
  * Zalo access token của người dùng hiện tại. Chuỗi rỗng nếu chưa có (vd. chạy trên trình duyệt).
@@ -90,6 +93,56 @@ export async function askCameraPermission(): Promise<boolean> {
 export function isZaloDarkTheme(): boolean {
   try {
     return getSystemInfo().zaloTheme === 'dark';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Mở liên kết Telegram ở ứng dụng NGOÀI (Telegram/trình duyệt) bằng `openOutApp` của SDK — không bao giờ điều hướng webview
+ * của Mini App tới URL bên ngoài. CHỈ mở khi đúng https://t.me/<bot>?start=<mã>; URL lạ trả false mà không gọi SDK.
+ * Trả false nếu không mở được (Zalo bản cũ, bị chặn...): giao diện sẽ hiện liên kết + nút sao chép để làm tay.
+ */
+export async function openTelegramLink(url: string): Promise<boolean> {
+  if (!isTelegramUrl(url)) return false;
+  try {
+    await openOutApp({ url });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Mở bảng chia sẻ của Zalo với một đoạn chữ (đã chứa liên kết). false nếu không chia sẻ được/người dùng huỷ. */
+export async function shareText(text: string): Promise<boolean> {
+  try {
+    await openShareSheet({ type: 'text', data: { text } });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Sao chép vào bộ nhớ tạm: Clipboard API, hoặc cách cũ bằng ô nhập ẩn. false nếu cả hai đều không được. */
+export async function copyText(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text);
+      return true;
+    }
+  } catch {
+    /* thử cách cũ */
+  }
+  try {
+    const box = document.createElement('textarea');
+    box.value = text;
+    box.setAttribute('readonly', '');
+    box.style.cssText = 'position:fixed;top:0;left:0;opacity:0';
+    document.body.appendChild(box);
+    box.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(box);
+    return ok;
   } catch {
     return false;
   }

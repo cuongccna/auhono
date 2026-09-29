@@ -473,3 +473,93 @@ describe('ack / pause / resume', () => {
     expect(f.mock.calls[0]![0]).toBe(`${BASE}/v1/devices/a%2Fb/ack`);
   });
 });
+
+describe('Telegram (API client)', () => {
+  const URL_OK = 'https://t.me/AuhonoBot?start=abcDEF123_-xyz';
+
+  it('getRecipients: đọc telegram_available + mode/telegram_linked; GET /recipients', async () => {
+    const f = vi.fn<typeof fetch>(async () =>
+      jsonRes({ telegram_available: true, recipients: [{ id: 1, name: 'Vợ', phone: '84912345678', mode: 'both', telegram_linked: true }] }),
+    );
+    const r = await client(f).getRecipients('AUH-000001');
+    expect(r.telegram_available).toBe(true);
+    expect(r.recipients[0]).toMatchObject({ mode: 'both', telegram_linked: true });
+    expect(f.mock.calls[0]![0]).toBe(`${BASE}/v1/devices/AUH-000001/recipients`);
+    expect(f.mock.calls[0]![1]!.method).toBe('GET');
+  });
+
+  it('listRecipients (cũ) vẫn trả mảng, chịu được server cũ không có telegram_available', async () => {
+    const f = vi.fn<typeof fetch>(async () => jsonRes({ recipients: [{ id: 1, name: 'Vợ', phone: '84912345678' }] }));
+    expect(await client(f).listRecipients('AUH-000001')).toEqual([{ id: 1, name: 'Vợ', phone: '84912345678' }]);
+    expect((await client(f).getRecipients('AUH-000001')).telegram_available).toBe(false);
+  });
+
+  it('createTelegramLink: POST .../recipients/:rid/telegram-link, trả url + expires_at', async () => {
+    const f = vi.fn<typeof fetch>(async () => jsonRes({ url: URL_OK, expires_at: 1_800_086_400 }));
+    expect(await client(f).createTelegramLink('AUH-000001', 7)).toEqual({ url: URL_OK, expires_at: 1_800_086_400 });
+    const [url, init] = f.mock.calls[0]!;
+    expect(url).toBe(`${BASE}/v1/devices/AUH-000001/recipients/7/telegram-link`);
+    expect(init!.method).toBe('POST');
+  });
+
+  it('createTelegramLink: server trả URL không phải t.me => bad_response, không lộ URL lạ ra ngoài', async () => {
+    for (const url of ['https://evil.example/x?start=abc', 'http://t.me/AuhonoBot?start=abc', 'javascript:alert(1)']) {
+      const f = vi.fn<typeof fetch>(async () => jsonRes({ url, expires_at: 1_800_086_400 }));
+      expect(await codeOf(client(f).createTelegramLink('AUH-000001', 7))).toBe('bad_response');
+    }
+  });
+
+  it('createTelegramLink: 503 telegram_not_configured, 404 not_found; POST không tự thử lại', async () => {
+    const f = vi.fn<typeof fetch>(async () => jsonRes({ error: 'telegram_not_configured' }, 503));
+    expect(await codeOf(client(f).createTelegramLink('AUH-000001', 7))).toBe('telegram_not_configured');
+    expect(f).toHaveBeenCalledTimes(1);
+    const g = vi.fn<typeof fetch>(async () => jsonRes({ error: 'not_found' }, 404));
+    expect(await codeOf(client(g).createTelegramLink('AUH-000001', 7))).toBe('not_found');
+  });
+
+  it('setRecipientMode: PATCH {mode} cho cả ba kênh', async () => {
+    const f = vi.fn<typeof fetch>(async () => jsonRes({ ok: true }));
+    const c = client(f);
+    for (const m of ['zns', 'both', 'telegram'] as const) await c.setRecipientMode('AUH-000001', 3, m);
+    expect(f.mock.calls.every((x) => x[0] === `${BASE}/v1/devices/AUH-000001/recipients/3` && x[1]!.method === 'PATCH')).toBe(true);
+    expect(f.mock.calls.map((x) => JSON.parse(x[1]!.body as string))).toEqual([{ mode: 'zns' }, { mode: 'both' }, { mode: 'telegram' }]);
+  });
+
+  it('setRecipientMode: 409 telegram_not_linked, 400 bad_request', async () => {
+    const f = vi.fn<typeof fetch>(async () => jsonRes({ error: 'telegram_not_linked' }, 409));
+    expect(await codeOf(client(f).setRecipientMode('AUH-000001', 3, 'both'))).toBe('telegram_not_linked');
+    const g = vi.fn<typeof fetch>(async () => jsonRes({ error: 'bad_request' }, 400));
+    expect(await codeOf(client(g).setRecipientMode('AUH-000001', 3, 'zns'))).toBe('bad_request');
+  });
+
+  it('unlinkTelegram: DELETE .../recipients/:rid/telegram', async () => {
+    const f = vi.fn<typeof fetch>(async () => jsonRes({ ok: true }));
+    await client(f).unlinkTelegram('AUH-000001', 3);
+    const [url, init] = f.mock.calls[0]!;
+    expect(url).toBe(`${BASE}/v1/devices/AUH-000001/recipients/3/telegram`);
+    expect(init!.method).toBe('DELETE');
+    expect(init!.body).toBeUndefined();
+  });
+
+  it('các lệnh ghi Telegram không tự thử lại khi mất mạng', async () => {
+    const f = vi.fn<typeof fetch>(async () => {
+      throw new TypeError('Failed to fetch');
+    });
+    const c = client(f);
+    expect(await codeOf(c.createTelegramLink('AUH-000001', 1))).toBe('network');
+    expect(await codeOf(c.setRecipientMode('AUH-000001', 1, 'both'))).toBe('network');
+    expect(await codeOf(c.unlinkTelegram('AUH-000001', 1))).toBe('network');
+    expect(f).toHaveBeenCalledTimes(3);
+  });
+
+  it('liên kết (chứa mã bí mật) không bị ghi log', async () => {
+    const spies = (['log', 'info', 'warn', 'error', 'debug'] as const).map((m) => vi.spyOn(console, m).mockImplementation(() => undefined));
+    try {
+      const f = vi.fn<typeof fetch>(async () => jsonRes({ url: URL_OK, expires_at: 1_800_086_400 }));
+      await client(f).createTelegramLink('AUH-000001', 1);
+      for (const s of spies) expect(s).not.toHaveBeenCalled();
+    } finally {
+      spies.forEach((s) => s.mockRestore());
+    }
+  });
+});

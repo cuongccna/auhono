@@ -4,6 +4,7 @@
 import { AppError } from './errors.ts';
 import type { ReadingPoint } from './chart.ts';
 import type { Kind } from './thresholds.ts';
+import { isTelegramUrl, type RecipientMode } from './telegram.ts';
 
 /** Loại tủ; 'other' = server có loại mới mà app chưa biết (vẫn hiển thị được, không bị lỗi cả danh sách). */
 export type DeviceKind = Kind | 'other';
@@ -53,6 +54,22 @@ export interface Recipient {
   name: string;
   /** Dạng 84xxxxxxxxx. */
   phone: string;
+  /** Kênh nhận: Zalo (zns) / cả hai / chỉ Telegram. Vắng mặt = server cũ. */
+  mode?: RecipientMode;
+  /** Đã kết nối Telegram chưa. Vắng mặt = server cũ. */
+  telegram_linked?: boolean;
+}
+
+export interface RecipientsResponse {
+  /** Server đã bật Telegram? false/vắng mặt => ẩn mọi giao diện Telegram. */
+  telegram_available: boolean;
+  recipients: Recipient[];
+}
+
+export interface TelegramLink {
+  url: string;
+  /** Unix giây; vắng mặt nếu server không trả. */
+  expires_at?: number;
 }
 
 const bad = (): never => {
@@ -160,13 +177,32 @@ export function parseReadings(v: unknown): Readings {
 
 export function parseRecipient(v: unknown): Recipient {
   const o = obj(v);
-  return { id: num(o, 'id'), name: str(o, 'name'), phone: str(o, 'phone') };
+  const r: Recipient = { id: num(o, 'id'), name: str(o, 'name'), phone: str(o, 'phone') };
+  // Trường Telegram: server cũ không có (vắng mặt). Giá trị lạ bị bỏ qua chứ không làm hỏng người nhận.
+  if (o.mode === 'zns' || o.mode === 'both' || o.mode === 'telegram') r.mode = o.mode;
+  if (typeof o.telegram_linked === 'boolean') r.telegram_linked = o.telegram_linked;
+  return r;
 }
 
 export function parseRecipientList(v: unknown): Recipient[] {
+  return parseRecipientsResponse(v).recipients;
+}
+
+/** `telegram_available` true chỉ khi server nói đúng `true`; vắng/sai kiểu => false (ẩn mọi giao diện Telegram). */
+export function parseRecipientsResponse(v: unknown): RecipientsResponse {
   const o = obj(v);
   if (!Array.isArray(o.recipients)) return bad();
-  return parseRows(o.recipients.slice(0, MAX_RECIPIENTS_PARSED), parseRecipient);
+  return {
+    telegram_available: o.telegram_available === true,
+    recipients: parseRows(o.recipients.slice(0, MAX_RECIPIENTS_PARSED), parseRecipient),
+  };
+}
+
+/** Phản hồi tạo liên kết: url PHẢI là https://t.me/<bot>?start=<mã>, nếu không => bad_response (không bao giờ đưa URL lạ đi tiếp). */
+export function parseTelegramLink(v: unknown): TelegramLink {
+  const o = obj(v);
+  if (!isTelegramUrl(o.url)) return bad();
+  return { url: o.url, expires_at: isNum(o.expires_at) && o.expires_at > 0 ? o.expires_at : undefined };
 }
 
 /** Phản hồi `{ ok: true, <field>: <Unix giây> }` (ack → acked_until, pause → paused_until). Thiếu/sai mốc thời gian => bad_response. */

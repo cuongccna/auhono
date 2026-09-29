@@ -400,3 +400,22 @@ main, .auh-card { overflow-wrap: break-word; }
   font-weight: 600;
   vertical-align: 2px;
 }
+
+/* Telegram */
+.auh-telegram { padding: 8px 0 12px; border-bottom: 1px solid var(--auh-border); }
+.auh-telegram:last-of-type { border-bottom: 0; }
+.auh-modes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 8px; }
+.auh-mode { min-height: var(--auh-tap); padding: 8px 6px; text-align: center; font-size: 15px; font-weight: 600; }
+.auh-code {
+  display: block;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--auh-card);
+  color: var(--auh-text);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+@media (max-width: 359px) {
+  .auh-modes { grid-template-columns: 1fr; }
+}

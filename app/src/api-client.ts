@@ -14,11 +14,16 @@ import {
   parseReadings,
   parseRecipient,
   parseRecipientList,
+  parseRecipientsResponse,
+  parseTelegramLink,
   parseServerTime,
   type Device,
   type Readings,
   type Recipient,
+  type RecipientsResponse,
+  type TelegramLink,
 } from './lib/schemas.ts';
+import type { RecipientMode } from './lib/telegram.ts';
 import type { Kind } from './lib/thresholds.ts';
 
 export const REQUEST_TIMEOUT_MS = 15_000;
@@ -244,6 +249,24 @@ export function createApiClient(opts: ApiOptions) {
 
     listRecipients: async (id: string, call?: CallOptions): Promise<Recipient[]> =>
       parseRecipientList((await request('GET', `${dev(id)}/recipients`, undefined, call)).json),
+
+    /** Như listRecipients nhưng kèm `telegram_available` (server cũ => false). */
+    getRecipients: async (id: string, call?: CallOptions): Promise<RecipientsResponse> =>
+      parseRecipientsResponse((await request('GET', `${dev(id)}/recipients`, undefined, call)).json),
+
+    /** Tạo liên kết Telegram dùng một lần (24 giờ). 503 telegram_not_configured, 404 not_found. Mỗi lần gọi thay liên kết cũ. */
+    createTelegramLink: async (id: string, recipientId: number): Promise<TelegramLink> =>
+      parseTelegramLink((await request('POST', `${dev(id)}/recipients/${Math.trunc(recipientId)}/telegram-link`, {})).json),
+
+    /** Đổi kênh nhận. 409 telegram_not_linked nếu mode khác 'zns' mà người nhận chưa kết nối. */
+    setRecipientMode: async (id: string, recipientId: number, mode: RecipientMode): Promise<void> => {
+      parseOk((await request('PATCH', `${dev(id)}/recipients/${Math.trunc(recipientId)}`, { mode })).json);
+    },
+
+    /** Ngắt kết nối Telegram; server đưa mode về 'zns'. Gọi lại an toàn. */
+    unlinkTelegram: async (id: string, recipientId: number): Promise<void> => {
+      parseOk((await request('DELETE', `${dev(id)}/recipients/${Math.trunc(recipientId)}/telegram`)).json);
+    },
 
     addRecipient: async (id: string, input: { name: string; phone: string }): Promise<Recipient> =>
       parseRecipient((await request('POST', `${dev(id)}/recipients`, input)).json),

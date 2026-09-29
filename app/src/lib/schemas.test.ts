@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { AppError } from './errors.ts';
-import { MAX_POINTS, parseOkUntil, parseDevice, parseDeviceList, parseOk, parseReadings, parseRecipient, parseRecipientList, parseServerTime } from './schemas.ts';
+import { MAX_POINTS, parseOkUntil, parseRecipientsResponse, parseTelegramLink, parseDevice, parseDeviceList, parseOk, parseReadings, parseRecipient, parseRecipientList, parseServerTime } from './schemas.ts';
 
 const device = {
   id: 'AUH-000001',
@@ -166,5 +166,44 @@ describe('trường mới: paused_until / acked_until / claimed_at', () => {
     bad(() => parseOkUntil({ ok: false, acked_until: 1_800_000_000 }, 'acked_until'));
     bad(() => parseOkUntil({ ok: true, paused_until: 1_800_000_000 }, 'acked_until'));
     bad(() => parseOkUntil(null, 'acked_until'));
+  });
+});
+
+describe('Telegram: người nhận và liên kết', () => {
+  const rec = { id: 1, name: 'Vợ', phone: '84912345678' };
+  it('đọc mode, telegram_linked, telegram_available', () => {
+    const r = parseRecipientsResponse({
+      telegram_available: true,
+      recipients: [{ ...rec, mode: 'both', telegram_linked: true }, { id: 2, name: 'A', phone: '84987654321', mode: 'zns', telegram_linked: false }],
+    });
+    expect(r.telegram_available).toBe(true);
+    expect(r.recipients[0]).toEqual({ ...rec, mode: 'both', telegram_linked: true });
+    expect(r.recipients[1]).toMatchObject({ mode: 'zns', telegram_linked: false });
+  });
+  it('server cũ (vắng telegram_available và các trường): available = false, trường vắng mặt', () => {
+    const r = parseRecipientsResponse({ recipients: [rec] });
+    expect(r.telegram_available).toBe(false);
+    expect('mode' in r.recipients[0]!).toBe(false);
+    expect('telegram_linked' in r.recipients[0]!).toBe(false);
+  });
+  it('telegram_available chỉ true khi đúng boolean true ("true", 1 => false)', () => {
+    for (const v of ['true', 1, null, 'yes']) expect(parseRecipientsResponse({ telegram_available: v, recipients: [] }).telegram_available).toBe(false);
+  });
+  it('mode lạ / telegram_linked sai kiểu bị bỏ qua, người nhận vẫn đọc được', () => {
+    const r = parseRecipientsResponse({ recipients: [{ ...rec, mode: 'sms', telegram_linked: 'yes' }] }).recipients[0]!;
+    expect(r).toEqual(rec);
+  });
+  it('parseTelegramLink: nhận đúng URL t.me, expires_at tùy chọn', () => {
+    expect(parseTelegramLink({ url: 'https://t.me/AuhonoBot?start=abc_DEF-1', expires_at: 1_800_086_400 })).toEqual({
+      url: 'https://t.me/AuhonoBot?start=abc_DEF-1',
+      expires_at: 1_800_086_400,
+    });
+    expect(parseTelegramLink({ url: 'https://t.me/AuhonoBot?start=abc' }).expires_at).toBeUndefined();
+  });
+  it('parseTelegramLink: URL không phải t.me => bad_response (không bao giờ đưa URL lạ đi tiếp)', () => {
+    for (const url of ['https://evil.example/x?start=abc', 'http://t.me/AuhonoBot?start=abc', 'javascript:alert(1)', 5, null, undefined]) {
+      bad(() => parseTelegramLink({ url, expires_at: 1 }));
+    }
+    bad(() => parseTelegramLink(null));
   });
 });

@@ -13,6 +13,7 @@ import {
   parseReadings,
   parseRecipient,
   parseRecipientList,
+  parseServerTime,
   type Device,
   type Readings,
   type Recipient,
@@ -20,6 +21,12 @@ import {
 import type { Kind } from './lib/thresholds.ts';
 
 export const REQUEST_TIMEOUT_MS = 15_000;
+/** Chờ Zalo trả token tối đa ngần này (hộp thoại cấp quyền treo/cầu nối SDK không trả lời). */
+export const TOKEN_TIMEOUT_MS = 30_000;
+/** Bỏ phản hồi lớn bất thường (trang lỗi/độc hại) thay vì nạp vào bộ nhớ điện thoại. */
+export const MAX_RESPONSE_CHARS = 2_000_000;
+/** Chờ ngắn trước khi thử lại GET gặp lỗi tạm thời 502/503/504 (Cloudflare) hoặc mất mạng thoáng qua. */
+export const RETRY_DELAY_MS = 800;
 
 export interface ApiOptions {
   /** Địa chỉ gốc của server, ví dụ https://auhono.example.workers.dev (không có dấu / cuối). */
@@ -28,6 +35,15 @@ export interface ApiOptions {
   getToken: () => Promise<string>;
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
+  tokenTimeoutMs?: number;
+  retryDelayMs?: number;
+  /** Gọi mỗi khi phản hồi có `server_time` hợp lệ: (server_time, giờ gửi, giờ nhận) để hiệu chỉnh đồng hồ. */
+  onServerTime?: (serverTime: number, sentAtMs: number, receivedAtMs: number) => void;
+}
+
+/** Tuỳ chọn cho từng lệnh gọi. `signal` để huỷ khi rời màn hình (chỉ dùng cho lệnh ĐỌC, không dùng cho lệnh ghi). */
+export interface CallOptions {
+  signal?: AbortSignal;
 }
 
 export interface ClaimInput {
@@ -57,20 +73,33 @@ export function createApiClient(opts: ApiOptions) {
   const baseUrl = assertSafeBase(opts.baseUrl);
   const doFetch = opts.fetchImpl ?? ((input, init) => fetch(input, init));
   const timeoutMs = opts.timeoutMs ?? REQUEST_TIMEOUT_MS;
+  const tokenTimeoutMs = opts.tokenTimeoutMs ?? TOKEN_TIMEOUT_MS;
+  const retryDelayMs = opts.retryDelayMs ?? RETRY_DELAY_MS;
+
+  interface Raw {
+    json: unknown;
+    sentAt: number;
+    receivedAt: number;
+  }
 
   /** Một lần gọi (có hạn 15 giây). Ném AppError với mã rõ ràng. */
-  async function attempt(method: string, path: string, token: string, body: unknown): Promise<unknown> {
+  async function attempt(method: string, path: string, token: string, body: unknown, external?: AbortSignal): Promise<Raw> {
+    if (external?.aborted) throw new AppError('aborted');
     const controller = new AbortController();
     let timedOut = false;
     const timer = setTimeout(() => {
       timedOut = true;
       controller.abort();
     }, timeoutMs);
+    const onExternalAbort = () => controller.abort();
+    external?.addEventListener('abort', onExternalAbort, { once: true });
+    const failure = (): AppError => new AppError(external?.aborted ? 'aborted' : timedOut ? 'timeout' : 'network');
 
     try {
       const headers: Record<string, string> = { Authorization: `Bearer ${token}`, Accept: 'application/json' };
       if (body !== undefined) headers['Content-Type'] = 'application/json';
       let res: Response;
+      const sentAt = Date.now();
       try {
         res = await doFetch(baseUrl + path, {
           method,
@@ -81,71 +110,132 @@ export function createApiClient(opts: ApiOptions) {
           credentials: 'omit', // không gửi cookie: xác thực chỉ bằng Bearer token
         });
       } catch {
-        throw new AppError(timedOut ? 'timeout' : 'network');
+        throw failure();
       }
       // Đọc thân phản hồi cũng nằm trong hạn 15 giây (signal vẫn còn hiệu lực).
       let json: unknown = null;
+      let text = '';
       try {
-        json = await res.json();
+        text = await res.text();
       } catch {
-        if (timedOut) throw new AppError('timeout');
+        throw failure();
+      }
+      if (text.length > MAX_RESPONSE_CHARS) throw new AppError('bad_response', res.status);
+      try {
+        json = text === '' ? null : JSON.parse(text);
+      } catch {
+        // Trang HTML của Cloudflare/portal Wi-Fi/proxy: không phải JSON.
         if (res.ok) throw new AppError('bad_response', res.status);
       }
       if (!res.ok) throw mapHttpError(res.status, json);
-      return json;
+      const receivedAt = Date.now();
+      return { json, sentAt, receivedAt };
+    } finally {
+      clearTimeout(timer);
+      external?.removeEventListener('abort', onExternalAbort);
+    }
+  }
+
+  /** Lấy token MỚI cho từng request (không cache): Zalo tự làm mới token nên token cũ có thể đã hết hạn. */
+  async function freshToken(): Promise<string> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const timeout = new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new AppError('timeout')), tokenTimeoutMs);
+      });
+      return ((await Promise.race([opts.getToken(), timeout])) as string | undefined) || '';
+    } catch (e) {
+      if (e instanceof AppError && e.code === 'timeout') throw e;
+      return '';
     } finally {
       clearTimeout(timer);
     }
   }
 
-  /** GET tự thử lại đúng 1 lần khi lỗi mạng (không thử lại POST/PATCH/DELETE để tránh làm 2 lần). */
-  async function request(method: string, path: string, body?: unknown): Promise<unknown> {
-    let token = '';
-    try {
-      token = (await opts.getToken()) || '';
-    } catch {
-      token = '';
-    }
+  const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+  /** Lỗi tạm thời đáng thử lại cho lệnh ĐỌC: mất mạng thoáng qua, hoặc 502/503/504 từ Cloudflare. */
+  const transient = (e: unknown) =>
+    e instanceof AppError && (e.code === 'network' || e.status === 502 || e.status === 503 || e.status === 504);
+
+  /**
+   * - GET tự thử lại đúng 1 lần khi lỗi tạm thời (POST/PATCH/DELETE không tự lặp để tránh làm hai lần).
+   * - Gặp 401: lấy token mới; nếu khác token vừa dùng thì thử lại đúng 1 lần (401 = server chưa xử lý gì nên an toàn với mọi lệnh).
+   */
+  async function request(method: string, path: string, body?: unknown, call?: CallOptions): Promise<Raw> {
+    let token = await freshToken();
     if (!token) throw new AppError('auth_required');
 
+    const run = async (): Promise<Raw> => {
+      try {
+        return await attempt(method, path, token, body, call?.signal);
+      } catch (e) {
+        if (method === 'GET' && transient(e)) {
+          await sleep(retryDelayMs);
+          return attempt(method, path, token, body, call?.signal);
+        }
+        throw e;
+      }
+    };
+
     try {
-      return await attempt(method, path, token, body);
+      return await run();
     } catch (e) {
-      if (method === 'GET' && e instanceof AppError && e.code === 'network') {
-        return attempt(method, path, token, body);
+      if (e instanceof AppError && e.status === 401 && e.code === 'unauthorized') {
+        const next = await freshToken();
+        if (next && next !== token) {
+          token = next;
+          return run();
+        }
       }
       throw e;
     }
   }
 
+  /** Báo giờ server (nếu có) cho bộ hiệu chỉnh đồng hồ. */
+  function noteServerTime(raw: Raw): void {
+    const t = parseServerTime(raw.json);
+    if (t !== undefined) opts.onServerTime?.(t, raw.sentAt, raw.receivedAt);
+  }
+
   const dev = (id: string) => `/v1/devices/${encodeURIComponent(id)}`;
 
   return {
-    listDevices: async (): Promise<Device[]> => parseDeviceList(await request('GET', '/v1/devices')),
+    listDevices: async (call?: CallOptions): Promise<Device[]> => {
+      const raw = await request('GET', '/v1/devices', undefined, call);
+      const devices = parseDeviceList(raw.json);
+      noteServerTime(raw);
+      return devices;
+    },
 
     claimDevice: async (input: ClaimInput): Promise<void> => {
-      parseOk(await request('POST', '/v1/devices/claim', input));
+      parseOk((await request('POST', '/v1/devices/claim', input)).json);
     },
 
     updateDevice: async (id: string, patch: DevicePatch): Promise<void> => {
-      parseOk(await request('PATCH', dev(id), patch));
+      parseOk((await request('PATCH', dev(id), patch)).json);
     },
 
     removeDevice: async (id: string): Promise<void> => {
-      parseOk(await request('DELETE', dev(id)));
+      parseOk((await request('DELETE', dev(id))).json);
     },
 
-    getReadings: async (id: string, hours = 24): Promise<Readings> =>
-      parseReadings(await request('GET', `${dev(id)}/readings?hours=${Math.min(168, Math.max(1, Math.trunc(hours) || 24))}`)),
+    getReadings: async (id: string, hours = 24, call?: CallOptions): Promise<Readings> => {
+      const h = Math.min(168, Math.max(1, Math.trunc(hours) || 24));
+      const raw = await request('GET', `${dev(id)}/readings?hours=${h}`, undefined, call);
+      const readings = parseReadings(raw.json);
+      noteServerTime(raw);
+      return readings;
+    },
 
-    listRecipients: async (id: string): Promise<Recipient[]> =>
-      parseRecipientList(await request('GET', `${dev(id)}/recipients`)),
+    listRecipients: async (id: string, call?: CallOptions): Promise<Recipient[]> =>
+      parseRecipientList((await request('GET', `${dev(id)}/recipients`, undefined, call)).json),
 
     addRecipient: async (id: string, input: { name: string; phone: string }): Promise<Recipient> =>
-      parseRecipient(await request('POST', `${dev(id)}/recipients`, input)),
+      parseRecipient((await request('POST', `${dev(id)}/recipients`, input)).json),
 
     removeRecipient: async (id: string, recipientId: number): Promise<void> => {
-      parseOk(await request('DELETE', `${dev(id)}/recipients/${Math.trunc(recipientId)}`));
+      parseOk((await request('DELETE', `${dev(id)}/recipients/${Math.trunc(recipientId)}`)).json);
     },
   };
 }

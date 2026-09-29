@@ -10,12 +10,15 @@ export type ErrorCode =
   | 'unauthorized'
   | 'too_large'
   | 'rate_limited'
+  | 'too_many_attempts' // nhập sai mã kích hoạt quá nhiều lần (server trả 429)
+  | 'auth_unavailable' // server không hỏi được Zalo (503): sự cố TẠM THỜI, token chưa chắc sai
   | 'internal'
   // Phía máy khách:
   | 'auth_required' // chưa lấy được access token (chưa cấp quyền)
   | 'network' // mất mạng / không kết nối được
   | 'timeout' // quá 15 giây
   | 'bad_response' // server trả dữ liệu không đúng dạng
+  | 'aborted' // request bị huỷ do rời màn hình/đổi thiết bị: KHÔNG hiển thị cho người dùng
   | 'unknown';
 
 const SERVER_CODES: ReadonlySet<string> = new Set<ErrorCode>([
@@ -27,6 +30,8 @@ const SERVER_CODES: ReadonlySet<string> = new Set<ErrorCode>([
   'unauthorized',
   'too_large',
   'rate_limited',
+  'too_many_attempts',
+  'auth_unavailable',
   'internal',
 ]);
 
@@ -45,6 +50,17 @@ export class AppError extends Error {
 
 export function isAppError(e: unknown): e is AppError {
   return e instanceof AppError;
+}
+
+/** Request bị huỷ có chủ đích (rời màn hình): bỏ qua, không báo lỗi. */
+export function isAborted(e: unknown): boolean {
+  return isAppError(e) && e.code === 'aborted';
+}
+
+/** Lỗi mà việc gửi lại CÓ THỂ đã được server xử lý thành công (mất phản hồi giữa đường). */
+export function isAmbiguous(e: unknown): boolean {
+  if (!isAppError(e) || e.code === 'auth_unavailable') return false; // auth_unavailable: server chưa xử lý gì
+  return e.code === 'network' || e.code === 'timeout' || e.code === 'bad_response' || (e.status !== undefined && e.status >= 500);
 }
 
 /** Lỗi cần người dùng cấp quyền/đăng nhập lại (hiện nút "Cho phép"). */
@@ -74,16 +90,22 @@ export const ERROR_MESSAGE: Record<ErrorCode, string> = {
   bad_range: 'Nhiệt độ cao nhất phải lớn hơn nhiệt độ thấp nhất.',
   too_many_recipients: 'Mỗi thiết bị chỉ có tối đa 5 người nhận cảnh báo. Hãy xóa bớt một người rồi thêm lại.',
   not_found: 'Không tìm thấy thiết bị này. Có thể thiết bị đã được gỡ khỏi tài khoản của bạn.',
+  // Cố ý chung chung: server không cho biết mã sai hay thiết bị đã có chủ (để không lộ thông tin của người khác).
   invalid_code:
-    'Mã không đúng hoặc thiết bị đã có chủ khác. Bạn kiểm tra lại mã trên hộp, hoặc liên hệ nơi bán để được hỗ trợ.',
+    'Mã không đúng, hoặc thiết bị này đang thuộc tài khoản khác. Bạn kiểm tra lại mã in trên hộp. Nếu là thiết bị đã qua sử dụng, hãy nhờ chủ cũ vào "Chi tiết thiết bị > Gỡ thiết bị" trước, hoặc liên hệ nơi bán.',
   unauthorized: 'Phiên đăng nhập Zalo đã hết hạn hoặc chưa được cho phép. Bạn bấm "Cho phép" rồi thử lại nhé.',
   too_large: 'Dữ liệu gửi đi quá lớn. Bạn thử rút gọn lại nhé.',
   rate_limited: 'Bạn thao tác hơi nhanh. Đợi một chút rồi thử lại nhé.',
+  too_many_attempts:
+    'Bạn đã nhập sai mã quá nhiều lần nên tạm thời bị khóa. Hãy đợi vài phút rồi thử lại. Nếu mã in trên hộp đúng mà vẫn báo lỗi, liên hệ nơi bán để được hỗ trợ.',
+  auth_unavailable: 'Zalo đang bận, chưa kiểm tra được tài khoản của bạn. Bạn thử lại sau ít phút nhé.',
   internal: 'Hệ thống đang gặp sự cố. Bạn thử lại sau ít phút nhé.',
   auth_required: 'Ứng dụng cần được phép dùng tài khoản Zalo của bạn. Bạn bấm "Cho phép" nhé.',
   network: 'Không kết nối được mạng. Bạn kiểm tra Wi-Fi hoặc 4G rồi thử lại nhé.',
   timeout: 'Mạng đang chậm, chưa nhận được phản hồi. Bạn thử lại nhé.',
-  bad_response: 'Nhận được dữ liệu lạ từ hệ thống. Bạn thử lại sau, nếu vẫn lỗi hãy liên hệ hỗ trợ.',
+  bad_response:
+    'Nhận được dữ liệu lạ. Có thể Wi-Fi đang đòi đăng nhập (quán cà phê, khách sạn) hoặc hệ thống đang bảo trì. Bạn thử đổi sang 4G hoặc thử lại sau.',
+  aborted: 'Đã hủy.',
   unknown: 'Có lỗi xảy ra. Bạn thử lại nhé.',
 };
 

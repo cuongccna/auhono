@@ -14,6 +14,8 @@ export interface ReadingPoint {
 
 /** Hai điểm liền kề cách nhau quá ngần này (giây) => thiết bị đã mất kết nối giữa chừng. */
 export const GAP_SECONDS = 15 * 60;
+/** Server gộp số đo theo khung 5 phút; `t` là ĐẦU khung nên số đo thật có thể muộn hơn `t` tới ~5 phút. */
+export const BUCKET_SECONDS = 5 * 60;
 
 export interface ChartLayout {
   width: number;
@@ -25,6 +27,15 @@ export interface ChartLayout {
 }
 
 export const DEFAULT_LAYOUT: ChartLayout = { width: 360, height: 220, padLeft: 38, padRight: 10, padTop: 10, padBottom: 26 };
+
+/**
+ * Khung vẽ theo bề rộng thật của màn hình (px). viewBox = số px thật nên chữ trong SVG giữ cỡ cố định
+ * (không bị co nhỏ khi màn hình 320 px). Kẹp trong 240..700 để không vỡ bố cục.
+ */
+export function layoutForWidth(widthPx: number): ChartLayout {
+  const width = Math.round(Math.min(700, Math.max(240, Number.isFinite(widthPx) ? widthPx : DEFAULT_LAYOUT.width)));
+  return { width, height: width < 340 ? 210 : 240, padLeft: 42, padRight: 12, padTop: 12, padBottom: 30 };
+}
 
 /** Sắp xếp theo thời gian, bỏ điểm trùng giờ và điểm có số không hợp lệ. */
 export function cleanPoints(points: readonly ReadingPoint[]): ReadingPoint[] {
@@ -123,6 +134,40 @@ export function tickStepHours(hours: number): number {
   return hours <= 6 ? 1 : hours <= 12 ? 2 : hours <= 24 ? 4 : hours <= 72 ? 12 : 24;
 }
 
+/**
+ * Như tickStepHours nhưng thưa hơn khi khung vẽ hẹp (màn hình 320 px, chữ to) để nhãn giờ không chồng lên nhau:
+ * mỗi nhãn cần ~44 px chiều ngang.
+ */
+export function tickStepFor(hours: number, plotWidthPx: number): number {
+  let step = tickStepHours(hours);
+  const steps = [1, 2, 3, 4, 6, 12, 24, 48, 72];
+  const fits = (h: number) => (hours / h) * 44 <= plotWidthPx;
+  for (const candidate of steps) {
+    if (candidate >= step && fits(candidate)) return candidate;
+  }
+  step = steps[steps.length - 1]!;
+  return step;
+}
+
+/**
+ * Từ khi nào nhiệt độ liên tục ở ngoài ngưỡng cho tới điểm mới nhất? Dùng để nói "đang vượt ngưỡng từ khoảng 13:20".
+ * Trả null nếu điểm mới nhất trong ngưỡng (hoặc không có điểm). `entireWindow` = suốt cả khung dữ liệu đều lệch,
+ * nghĩa là thời điểm thật còn sớm hơn `since`.
+ */
+export function outOfRangeSince(
+  points: readonly ReadingPoint[],
+  minC: number,
+  maxC: number,
+): { since: number; entireWindow: boolean; direction: 'high' | 'low' } | null {
+  const pts = cleanPoints(points);
+  const outside = (p: ReadingPoint) => p.avg > maxC || p.avg < minC;
+  const last = pts[pts.length - 1];
+  if (!last || !outside(last)) return null;
+  let i = pts.length - 1;
+  while (i > 0 && outside(pts[i - 1]!) && pts[i]!.t - pts[i - 1]!.t <= GAP_SECONDS) i--;
+  return { since: pts[i]!.t, entireWindow: i === 0, direction: last.avg > maxC ? 'high' : 'low' };
+}
+
 /** Vạch giờ căn theo GIỜ VIỆT NAM (00:00, 04:00, 08:00...). Nửa đêm ghi ngày (30/09). */
 export function timeTicks(startSec: number, endSec: number, stepHours: number): TimeTick[] {
   const stepSec = stepHours * 3600;
@@ -161,6 +206,8 @@ export interface ChartModel {
   yTicks: { y: number; label: string }[];
   /** Vị trí điểm mới nhất để đánh dấu. */
   latest: { x: number; y: number } | null;
+  /** Các điểm (trung bình) nằm ngoài ngưỡng: vẽ bằng hình thoi để không phải phân biệt chỉ bằng màu. */
+  outside: { x: number; y: number }[];
 }
 
 export interface ChartInput {
@@ -209,7 +256,7 @@ export function buildChart(input: ChartInput): ChartModel {
     gaps.push({ x1: sx(segs[i - 1]![segs[i - 1]!.length - 1]!.t), x2: sx(segs[i]![0]!.t) });
   }
   const last = points[points.length - 1];
-  if (last && end - last.t > GAP_SECONDS) gaps.push({ x1: sx(last.t), x2: plot.right });
+  if (last && end - (last.t + BUCKET_SECONDS) > GAP_SECONDS) gaps.push({ x1: sx(last.t), x2: plot.right });
   if (!last) gaps.push({ x1: plot.left, x2: plot.right }); // không có điểm nào: cả khung là "không có dữ liệu"
 
   const bandTop = Math.min(input.maxC, y.hi);
@@ -226,9 +273,14 @@ export function buildChart(input: ChartInput): ChartModel {
     maxLineY: inY(input.maxC) ? sy(input.maxC) : null,
     segments,
     gaps,
-    xTicks: timeTicks(start, end, tickStepHours(input.hours)).map((t) => ({ x: sx(t.t), label: t.label })),
+    xTicks: timeTicks(start, end, tickStepFor(input.hours, plot.right - plot.left)).map((t) => ({ x: sx(t.t), label: t.label })),
     yTicks: yTickValues(y.lo, y.hi, y.step).map((v) => ({ y: sy(v), label: formatTempShort(v) })),
     latest: last ? { x: sx(last.t), y: sy(last.avg) } : null,
+    // Tối đa 120 điểm gần nhất để SVG không phình khi cả ngày đều lệch.
+    outside: points
+      .filter((p) => p.avg > input.maxC || p.avg < input.minC)
+      .slice(-120)
+      .map((p) => ({ x: sx(p.t), y: sy(p.avg) })),
   };
 }
 
@@ -253,7 +305,7 @@ export function describeSeries(input: { points: readonly ReadingPoint[]; minC: n
   parts.push(outside > 0 ? `Có khoảng ${outside * 5} phút nhiệt độ ra ngoài ngưỡng.` : 'Nhiệt độ luôn trong ngưỡng.');
 
   const segs = splitSegments(points);
-  const gapCount = segs.length - 1 + (input.nowSec - last.t > GAP_SECONDS ? 1 : 0);
+  const gapCount = segs.length - 1 + (input.nowSec - (last.t + BUCKET_SECONDS) > GAP_SECONDS ? 1 : 0);
   if (gapCount > 0) parts.push(`Thiết bị mất kết nối ${gapCount} lần (chỗ đường bị đứt).`);
   return parts.join(' ');
 }

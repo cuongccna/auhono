@@ -34,8 +34,19 @@ CREATE TABLE recipients (
   device_id  TEXT NOT NULL REFERENCES devices(id) ON DELETE CASCADE,
   name       TEXT NOT NULL,
   phone      TEXT NOT NULL,
+  -- Kênh nhận: 'zns' (Zalo, tốn phí), 'both' (Zalo + Telegram), 'telegram' (chỉ Telegram, miễn phí).
+  -- 'telegram'/'both' chỉ hợp lệ khi đã liên kết Telegram (telegram_chat_id không null).
+  mode             TEXT NOT NULL DEFAULT 'zns' CHECK (mode IN ('zns', 'both', 'telegram')),
+  telegram_chat_id INTEGER,
   created_at INTEGER NOT NULL,
   UNIQUE (device_id, phone)
+);
+
+-- Mã liên kết Telegram dùng một lần (deep link t.me/<bot>?start=<token>), hết hạn sau 24 giờ.
+CREATE TABLE telegram_links (
+  token        TEXT PRIMARY KEY,
+  recipient_id INTEGER NOT NULL REFERENCES recipients(id) ON DELETE CASCADE,
+  expires_at   INTEGER NOT NULL
 );
 
 -- Số đo chi tiết, giữ 7 ngày rồi gộp thành trung bình theo giờ.
@@ -87,7 +98,8 @@ CREATE INDEX idx_alert_events_device ON alert_events(device_id, ts);
 CREATE TABLE notifications (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
   event_id   INTEGER NOT NULL REFERENCES alert_events(id) ON DELETE CASCADE,
-  phone      TEXT NOT NULL,
+  channel    TEXT NOT NULL DEFAULT 'zns' CHECK (channel IN ('zns', 'telegram')),
+  target     TEXT NOT NULL,   -- số điện thoại 84xxxxxxxxx (zns) hoặc chat_id (telegram)
   status     TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'sending', 'sent', 'failed', 'suppressed')),
   attempts   INTEGER NOT NULL DEFAULT 0,
   last_error TEXT,

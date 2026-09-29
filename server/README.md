@@ -64,6 +64,30 @@ Chưa cấu hình ZNS thì cảnh báo chỉ được ghi log (`LogNotifier`), h
 
 Xem [`../docs/COST.md`](../docs/COST.md). Theo dõi thực tế bằng `npm run usage`.
 
+## Telegram (kênh miễn phí, dự phòng cho ZNS)
+
+Mỗi người nhận có thể nhận qua ZNS, Telegram, hoặc cả hai (`mode`: `zns` | `both` | `telegram`). Hai kênh độc lập: ZNS lỗi
+hay hết trần chi phí thì tin Telegram vẫn đi. Telegram không bị trần 20 tin/ngày (miễn phí) và nhắc lại gửi cho mọi người đã liên kết.
+Bạn (người vận hành) cũng nhận báo lỗi hệ thống qua Telegram (cron lỗi, tin thất bại hẳn).
+
+```bash
+# 1. Chat với @BotFather: /newbot -> lấy TOKEN và tên bot
+# 2. Bí mật + tên bot
+openssl rand -hex 24                               # dùng làm TELEGRAM_WEBHOOK_SECRET
+npx wrangler secret put TELEGRAM_BOT_TOKEN
+npx wrangler secret put TELEGRAM_WEBHOOK_SECRET
+#    đặt "TELEGRAM_BOT_USERNAME": "TenBotCuaBan" trong wrangler.jsonc rồi npm run deploy
+# 3. Đăng ký webhook (đọc bí mật từ biến môi trường)
+TELEGRAM_BOT_TOKEN=... TELEGRAM_WEBHOOK_SECRET=... WORKER_URL=https://auhono-server.<tài-khoản>.workers.dev bash scripts/telegram-setup.sh
+# 4. (tùy chọn) nhận báo lỗi hệ thống: nhắn bất kỳ gì cho bot, rồi lấy chat id của bạn
+curl -s "https://api.telegram.org/bot<TOKEN>/getUpdates" | grep -o '"chat":{"id":[0-9]*'
+npx wrangler secret put OPERATOR_TELEGRAM_CHAT_ID
+```
+
+Liên kết một người nhận: app gọi `POST /v1/devices/:id/recipients/:rid/telegram-link` → `https://t.me/<bot>?start=<token>`
+(một lần, hết hạn 24 giờ). Người nhận mở liên kết, bấm **Start**. Webhook chỉ chấp nhận khi header `X-Telegram-Bot-Api-Secret-Token`
+đúng, chỉ liên kết từ chat riêng (không nhóm/kênh). `/stop` trong chat để ngừng nhận.
+
 ## Vận hành (SQL hữu ích)
 
 ```bash
@@ -99,6 +123,6 @@ npx wrangler d1 execute auhono --remote --command "SELECT phone, last_error, upd
 - **Chia sẻ thiết bị cho nhiều tài khoản** (vợ chồng cùng xem app): hiện mỗi thiết bị thuộc một tài khoản; người khác chỉ nhận tin nhắn.
 - **Tin nhắn thử** cho người nhận mới (để phát hiện gõ nhầm số trước khi có sự cố) — tốn thêm phí ZNS và một mẫu tin.
 - **Xác nhận đồng ý của người nhận**: chủ quán có thể nhập số của người khác; nên có bước xác nhận trước khi bán đại trà.
-- **Kênh dự phòng** khi ZNS bị từ chối/lỗi kéo dài (SMS, push): hiện chỉ có hàng đợi thử lại và `notify_failures_24h`.
+- **SMS** làm kênh dự phòng thứ ba (thường đắt hơn ZNS): hiện có hàng đợi thử lại, `notify_failures_24h` và Telegram.
 - **Khóa riêng từng thiết bị xoay được**: khóa suy từ `MASTER_SECRET` + id nên thu hồi = cấp id mới.
 - **Ngưỡng theo mùa/tủ khác nhau** (xả đá định kỳ có lịch): hiện dùng ngưỡng cố định + thời gian vượt liên tục.

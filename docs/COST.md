@@ -74,9 +74,17 @@ từ năm 2, gia hạn 150–200 nghìn gần như thuần lợi nhuận sau khi
 | Web push / push của app riêng | 0đ | Zalo Mini App không cung cấp push tùy ý; app riêng thì phải làm và duy trì |
 | SMS brandname | Thường đắt hơn ZNS | Không nên dùng chỉ để tiết kiệm |
 
-Mã đã có sẵn giao diện `Notifier` (`server/src/notify.ts`): thêm kênh mới chỉ cần triển khai `send()`. Đề xuất: giữ **ZNS
-cho cảnh báo nghiêm trọng** (nhiệt độ, mất kết nối), và nếu muốn, thêm kênh miễn phí (Telegram) làm bản sao/dự phòng
-cho người vận hành. Chưa làm vì cần quyết định của bạn.
+**Đã làm: Telegram** (xem `server/README.md`, mục Telegram): kênh miễn phí, độc lập với ZNS, làm dự phòng/bản sao cho
+người nhận muốn dùng và để báo lỗi hệ thống cho người vận hành. Telegram không bị trần chi phí ZNS. Người nhận có thể chọn
+"chỉ Telegram" để không tốn đồng nào, hoặc "cả hai" để có dự phòng.
+
+Cách đơn giản hơn Telegram (chưa làm, nếu cần):
+- **ntfy.sh** (push miễn phí, không cần tài khoản): server chỉ gửi một HTTP POST tới `https://ntfy.sh/<chủ-đề-bí-mật>`; người nhận
+  cài app ntfy và đăng ký chủ đề đó. Không có bot, không webhook, không liên kết chat_id. Ưu tiên "khẩn cấp" có thể xuyên chế độ
+  không làm phiền trên Android. Đổi lại: ít người biết app, dịch vụ công cộng không có cam kết chất lượng (có thể tự dựng máy chủ ntfy).
+  Rất hợp làm kênh báo lỗi cho **người vận hành**.
+- **Còi báo động ngay trên thiết bị** (buzzer ~5 nghìn đồng, chạy khi nhiệt độ vượt ngưỡng, có nút tắt tiếng): không cần mạng, không
+  tốn tin, hữu ích lúc có người ở quán. Không thay được cảnh báo từ xa lúc quán đóng cửa.
 
 ## 4. Cách tính tiền cho khách (gợi ý để bạn cân nhắc)
 

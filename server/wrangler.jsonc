@@ -21,9 +21,12 @@
     // ZNS template id (đăng ký trên Zalo, xem docs/zns-templates.md). Để trống = chỉ ghi log.
     "ZNS_TEMPLATE_ALERT": "",
     "ZNS_TEMPLATE_OFFLINE": "",
-    "ZNS_TEMPLATE_RECOVERED": ""
+    "ZNS_TEMPLATE_RECOVERED": "",
+    // Tên bot Telegram (không có @). Để trống = tắt kênh Telegram. Xem server/README.md, mục Telegram.
+    "TELEGRAM_BOT_USERNAME": ""
   }
   // Secrets (đặt bằng `wrangler secret put`, KHÔNG ghi vào file này):
   //   MASTER_SECRET       - sinh khóa từng thiết bị + mã kích hoạt
   //   ZALO_APP_ID, ZALO_APP_SECRET, ZALO_OA_REFRESH_TOKEN (khởi tạo lần đầu)
+  //   TELEGRAM_BOT_TOKEN, TELEGRAM_WEBHOOK_SECRET, OPERATOR_TELEGRAM_CHAT_ID (tùy chọn)
 }

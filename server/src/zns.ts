@@ -65,10 +65,10 @@ export class ZnsNotifier implements Notifier {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', access_token: token },
         body: JSON.stringify({
-          phone: msg.phone,
+          phone: msg.target,
           template_id: template,
           template_data: templateData(msg),
-          tracking_id: `${msg.kind}-${msg.ts}-${msg.phone}`.slice(0, 48),
+          tracking_id: `${msg.kind}-${msg.ts}-${msg.target}`.slice(0, 48),
         }),
       });
       const body = (await res.json().catch(() => ({}))) as { error?: number; message?: string };

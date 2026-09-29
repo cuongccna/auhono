@@ -10,6 +10,7 @@ import {
   verifyCanonical,
 } from './crypto.ts';
 import { ingest } from './ingest.ts';
+import { handleTelegramUpdate, LINK_TTL_SECONDS, sendTelegram, verifyWebhookSecret } from './telegram.ts';
 import { dispatchPending, type Notifier } from './notify.ts';
 import { AuthUnavailableError, zaloVerifier, type OwnerVerifier } from './owner-auth.ts';
 import { getState, resetStateStmt } from './db.ts';
@@ -20,6 +21,8 @@ export interface Deps {
   verifyOwner: OwnerVerifier;
   /** Tạo Notifier cho request hiện tại (cần env để đọc cấu hình ZNS). */
   notifier: (env: Env) => Notifier;
+  /** fetch cho các cuộc gọi ra ngoài của app (trả lời webhook Telegram); mặc định fetch toàn cục. */
+  fetchFn?: typeof fetch;
 }
 
 type Vars = { device: DeviceRow; body: Uint8Array; accountId: number };
@@ -476,10 +479,14 @@ export function createApp(deps: Deps) {
     const device = await ownedDevice(c);
     if (!device) return c.json({ error: 'not_found' }, 404);
     const { results } = await c.env.DB
-      .prepare('SELECT id, name, phone FROM recipients WHERE device_id = ? ORDER BY id')
+      .prepare('SELECT id, name, phone, mode, telegram_chat_id IS NOT NULL AS telegram_linked FROM recipients WHERE device_id = ? ORDER BY id')
       .bind(device.id)
-      .all();
-    return c.json({ recipients: results });
+      .all<{ id: number; name: string; phone: string; mode: string; telegram_linked: number }>();
+    // Người đầu tiên là "người nhận chính" (nhận cả tin nhắc lại qua ZNS).
+    return c.json({
+      telegram_available: Boolean(c.env.TELEGRAM_BOT_TOKEN && c.env.TELEGRAM_BOT_USERNAME && c.env.TELEGRAM_WEBHOOK_SECRET),
+      recipients: results.map((r) => ({ id: r.id, name: r.name, phone: r.phone, mode: r.mode, telegram_linked: r.telegram_linked === 1 })),
+    });
   });
 
   app.post('/v1/devices/:id/recipients', ownerAuth, async (c) => {
@@ -507,6 +514,56 @@ export function createApp(deps: Deps) {
     return c.json({ id: row!.id, name: parsed.data.name, phone }, 201);
   });
 
+  /** Người nhận thuộc thiết bị của chủ quán hiện tại, hoặc null. */
+  async function ownedRecipient(c: Ctx, device: DeviceRow) {
+    return c.env.DB
+      .prepare('SELECT id, mode, telegram_chat_id FROM recipients WHERE id = ? AND device_id = ?')
+      .bind(Number(c.req.param('rid')), device.id)
+      .first<{ id: number; mode: string; telegram_chat_id: number | null }>();
+  }
+
+  // Tạo liên kết Telegram dùng một lần cho người nhận.
+  app.post('/v1/devices/:id/recipients/:rid/telegram-link', ownerAuth, async (c) => {
+    const device = await ownedDevice(c);
+    const rec = device ? await ownedRecipient(c, device) : null;
+    if (!device || !rec) return c.json({ error: 'not_found' }, 404);
+    if (!c.env.TELEGRAM_BOT_TOKEN || !c.env.TELEGRAM_BOT_USERNAME || !c.env.TELEGRAM_WEBHOOK_SECRET) {
+      return c.json({ error: 'telegram_not_configured' }, 503);
+    }
+    const bytes = crypto.getRandomValues(new Uint8Array(16));
+    const token = btoa(String.fromCharCode(...bytes)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    const expires = deps.now() + LINK_TTL_SECONDS;
+    await c.env.DB.batch([
+      c.env.DB.prepare('DELETE FROM telegram_links WHERE recipient_id = ?').bind(rec.id), // chỉ một liên kết còn hiệu lực
+      c.env.DB.prepare('INSERT INTO telegram_links (token, recipient_id, expires_at) VALUES (?, ?, ?)').bind(token, rec.id, expires),
+    ]);
+    return c.json({ url: `https://t.me/${c.env.TELEGRAM_BOT_USERNAME}?start=${token}`, expires_at: expires });
+  });
+
+  // Đổi kênh nhận: 'zns' | 'both' | 'telegram' (hai kênh sau cần đã liên kết Telegram).
+  app.patch('/v1/devices/:id/recipients/:rid', ownerAuth, async (c) => {
+    const device = await ownedDevice(c);
+    const rec = device ? await ownedRecipient(c, device) : null;
+    if (!device || !rec) return c.json({ error: 'not_found' }, 404);
+    const parsed = z.object({ mode: z.enum(['zns', 'both', 'telegram']) }).safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: 'bad_request' }, 400);
+    if (parsed.data.mode !== 'zns' && rec.telegram_chat_id === null) return c.json({ error: 'telegram_not_linked' }, 409);
+    await c.env.DB.prepare('UPDATE recipients SET mode = ? WHERE id = ?').bind(parsed.data.mode, rec.id).run();
+    return c.json({ ok: true, mode: parsed.data.mode });
+  });
+
+  // Hủy liên kết Telegram (người nhận quay về chỉ nhận ZNS).
+  app.delete('/v1/devices/:id/recipients/:rid/telegram', ownerAuth, async (c) => {
+    const device = await ownedDevice(c);
+    const rec = device ? await ownedRecipient(c, device) : null;
+    if (!device || !rec) return c.json({ error: 'not_found' }, 404);
+    await c.env.DB.batch([
+      c.env.DB.prepare("UPDATE recipients SET telegram_chat_id = NULL, mode = 'zns' WHERE id = ?").bind(rec.id),
+      c.env.DB.prepare('DELETE FROM telegram_links WHERE recipient_id = ?').bind(rec.id),
+    ]);
+    return c.json({ ok: true });
+  });
+
   app.delete('/v1/devices/:id/recipients/:rid', ownerAuth, async (c) => {
     const device = await ownedDevice(c);
     if (!device) return c.json({ error: 'not_found' }, 404);
@@ -515,6 +572,22 @@ export function createApp(deps: Deps) {
       .bind(Number(c.req.param('rid')), device.id)
       .run();
     return c.json({ ok: true });
+  });
+
+  // Webhook của Telegram (đặt bằng setWebhook kèm secret_token). Chỉ chấp nhận khi header bí mật đúng.
+  app.post('/telegram/webhook', async (c) => {
+    if (!c.env.TELEGRAM_BOT_TOKEN || !c.env.TELEGRAM_WEBHOOK_SECRET) return c.json({ error: 'not_found' }, 404);
+    if (!(await verifyWebhookSecret(c.env, c.req.header('X-Telegram-Bot-Api-Secret-Token')))) {
+      return c.json({ error: 'unauthorized' }, 401);
+    }
+    const update = await c.req.json().catch(() => null);
+    if (update && typeof update === 'object') {
+      const token = c.env.TELEGRAM_BOT_TOKEN;
+      await handleTelegramUpdate(c.env.DB, update, deps.now(), (chatId, text) =>
+        sendTelegram(token, chatId, text, deps.fetchFn ?? fetch).catch(() => undefined),
+      ).catch((err) => console.error('telegram webhook', err instanceof Error ? err.message : err));
+    }
+    return c.json({ ok: true }); // luôn 200 để Telegram không gửi lại
   });
 
   app.notFound((c) => c.json({ error: 'not_found' }, 404));

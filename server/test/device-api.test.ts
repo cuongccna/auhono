@@ -161,7 +161,7 @@ describe('cảnh báo đầu-cuối', () => {
     seq = await run(id, seq, h.clock.now + 60, 25, -10); // nóng 25 phút
     const alarms = h.notifier.sent.filter((m) => m.kind === 'temp_alarm');
     expect(alarms).toHaveLength(1);
-    expect(alarms[0]).toMatchObject({ phone: '84912345678', deviceName: 'Tủ kem', detail: 'high', maxC: -18 });
+    expect(alarms[0]).toMatchObject({ channel: 'zns', target: '84912345678', deviceName: 'Tủ kem', detail: 'high', maxC: -18 });
 
     await run(id, seq, h.clock.now + 60, 10, -22); // về bình thường
     expect(h.notifier.sent.map((m) => m.kind)).toEqual(['temp_alarm', 'recovered']);

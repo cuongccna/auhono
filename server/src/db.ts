@@ -81,14 +81,21 @@ function saveStateStmt(db: D1Database, deviceId: string, s: AlertState, expected
     );
 }
 
-/** Nhắc lại chỉ gửi cho người nhận chính (đăng ký đầu tiên): tiết kiệm tiền tin, tránh làm phiền cả nhà. */
+/** Nhắc lại qua ZNS chỉ gửi cho người nhận chính (đăng ký đầu tiên): tiết kiệm tiền tin, tránh làm phiền cả nhà. */
 const REMINDER_KINDS = new Set(['temp_reminder', 'offline_reminder']);
 
+/** Các lý do không gửi. `zns`: tạm dừng hoặc vượt trần chi phí. `telegram` (miễn phí): chỉ khi tạm dừng. */
+export interface Suppress {
+  zns: boolean;
+  telegram: boolean;
+}
+
 /**
- * Ghi sự kiện + tin cho người nhận, chỉ khi version còn đúng.
- * - Báo mới / "đã ổn" / "kết nối lại": mọi người nhận. Nhắc lại: chỉ người nhận chính.
- * - `suppress`: vẫn ghi sự kiện và tin (để tra cứu) nhưng đánh dấu 'suppressed', không bao giờ gửi
- *   (đang tạm dừng, hoặc vượt trần tin/ngày).
+ * Ghi sự kiện + tin cho người nhận, chỉ khi version còn đúng. Mỗi người nhận có thể có 2 tin độc lập
+ * (ZNS và Telegram) để một kênh hỏng không làm mất cảnh báo ở kênh kia.
+ * - Báo mới / "đã ổn" / "kết nối lại": mọi người nhận. Nhắc lại ZNS: chỉ người nhận chính; nhắc lại Telegram: mọi
+ *   người đã liên kết (miễn phí).
+ * - Tin bị chặn vẫn được ghi (status 'suppressed') để tra cứu nhưng không bao giờ được gửi.
  * Tin gắn với sự kiện qua `token` ngẫu nhiên (không dùng last_insert_rowid: SQLite có thể
  * đổi giá trị đó giữa chừng khi INSERT...SELECT nhiều dòng).
  */
@@ -98,7 +105,7 @@ function eventStmts(
   e: AlertEvent,
   now: number,
   expected: number,
-  suppress: boolean,
+  suppress: Suppress,
 ): D1PreparedStatement[] {
   const token = crypto.randomUUID();
   const primaryOnly = REMINDER_KINDS.has(e.kind);
@@ -112,13 +119,21 @@ function eventStmts(
       .bind(token, deviceId, e.kind, e.ts, e.tempC, e.detail, expected),
     db
       .prepare(
-        `INSERT INTO notifications (event_id, phone, status, updated_at)
-         SELECT ev.id, r.phone, ?3, ?2 FROM alert_events ev
+        `INSERT INTO notifications (event_id, channel, target, status, updated_at)
+         SELECT ev.id, 'zns', r.phone, ?3, ?2 FROM alert_events ev
          JOIN recipients r ON r.device_id = ev.device_id
-         WHERE ev.token = ?1
+         WHERE ev.token = ?1 AND r.mode IN ('zns', 'both')
            AND (?4 = 0 OR r.id = (SELECT MIN(id) FROM recipients WHERE device_id = ev.device_id))`,
       )
-      .bind(token, now, suppress ? 'suppressed' : 'pending', primaryOnly ? 1 : 0),
+      .bind(token, now, suppress.zns ? 'suppressed' : 'pending', primaryOnly ? 1 : 0),
+    db
+      .prepare(
+        `INSERT INTO notifications (event_id, channel, target, status, updated_at)
+         SELECT ev.id, 'telegram', CAST(r.telegram_chat_id AS TEXT), ?3, ?2 FROM alert_events ev
+         JOIN recipients r ON r.device_id = ev.device_id
+         WHERE ev.token = ?1 AND r.mode IN ('telegram', 'both') AND r.telegram_chat_id IS NOT NULL`,
+      )
+      .bind(token, now, suppress.telegram ? 'suppressed' : 'pending'),
   ];
 }
 
@@ -145,17 +160,20 @@ export async function commitState(
 ): Promise<boolean> {
   const stmts = [...extra];
   if (events.length > 0) {
-    let suppress = pausedUntil !== null && now < pausedUntil;
-    if (!suppress) {
+    const paused = pausedUntil !== null && now < pausedUntil;
+    let overCap = false;
+    if (!paused) {
+      // Trần chỉ tính tin ZNS (tốn tiền); Telegram miễn phí nên không bị trần này chặn.
       const used = await db
         .prepare(
           `SELECT COUNT(*) AS n FROM notifications n JOIN alert_events e ON e.id = n.event_id
-           WHERE e.device_id = ? AND e.ts >= ? AND n.status != 'suppressed'`,
+           WHERE e.device_id = ? AND e.ts >= ? AND n.channel = 'zns' AND n.status != 'suppressed'`,
         )
         .bind(deviceId, now - 24 * 3600)
         .first<{ n: number }>();
-      suppress = (used?.n ?? 0) >= DAILY_MESSAGE_CAP;
+      overCap = (used?.n ?? 0) >= DAILY_MESSAGE_CAP;
     }
+    const suppress: Suppress = { zns: paused || overCap, telegram: paused };
     for (const e of events) stmts.push(...eventStmts(db, deviceId, e, now, before.version, suppress));
   }
   stmts.push(saveStateStmt(db, deviceId, next, before.version));

@@ -28,7 +28,7 @@ describe('nhiều người nhận: tin gắn đúng sự kiện', () => {
     expect(await commitState(testEnv.DB, id, before, next, [ev('temp_alarm'), ev('temp_reminder')], NOW)).toBe(true);
 
     const rows = (await testEnv.DB.prepare(
-      'SELECT n.phone, e.device_id, e.kind FROM notifications n JOIN alert_events e ON e.id = n.event_id WHERE e.device_id IN (?, ?)',
+      'SELECT n.target AS phone, e.device_id, e.kind FROM notifications n JOIN alert_events e ON e.id = n.event_id WHERE e.device_id IN (?, ?)',
     ).bind(id, other).all()).results as any[];
     expect(rows).toHaveLength(4);
     expect(new Set(rows.map((r) => r.device_id))).toEqual(new Set([id]));
@@ -129,7 +129,7 @@ describe('gửi tin không trùng, có thử lại', () => {
     await addRecipient(id, '0987654321');
     const ok = new FakeNotifier();
     await dispatchPending(testEnv.DB, ok, NOW + 1);
-    expect(ok.sent.map((m) => m.phone)).toEqual(['84912345678']);
+    expect(ok.sent.map((m) => m.target)).toEqual(['84912345678']);
   });
 });
 

@@ -2,8 +2,12 @@
 // Notifier là giao diện nhỏ để đổi kênh (ZNS -> SMS/push) mà không đụng logic cảnh báo.
 import type { AlertEventKind } from './alerts.ts';
 
+export type Channel = 'zns' | 'telegram';
+
 export interface NotificationMessage {
-  phone: string;
+  channel: Channel;
+  /** Số điện thoại 84xxxxxxxxx (zns) hoặc chat_id (telegram). */
+  target: string;
   kind: AlertEventKind;
   deviceName: string;
   tempC: number | null;
@@ -15,14 +19,25 @@ export interface NotificationMessage {
 }
 
 export interface Notifier {
-  /** Ném lỗi nếu gửi thất bại (sẽ được thử lại). */
+  /** Ném lỗi nếu gửi thất bại (sẽ được thử lại). Ném PermanentNotifyError nếu thử lại vô ích. */
   send(msg: NotificationMessage): Promise<void>;
+}
+
+/** Lỗi vĩnh viễn (người dùng chặn bot, chat không tồn tại...): không thử lại. */
+export class PermanentNotifyError extends Error {}
+
+/** Chuyển tin tới đúng kênh. Kênh nào chưa cấu hình thì dùng dự phòng (chỉ ghi log). */
+export class RouterNotifier implements Notifier {
+  constructor(private byChannel: Record<Channel, Notifier>) {}
+  send(msg: NotificationMessage): Promise<void> {
+    return this.byChannel[msg.channel].send(msg);
+  }
 }
 
 /** Dùng khi chưa cấu hình ZNS (dev/test): chỉ ghi log. */
 export class LogNotifier implements Notifier {
   async send(msg: NotificationMessage): Promise<void> {
-    console.log(`[notify] ${msg.kind} -> ${msg.phone.slice(0, 4)}***: ${msg.deviceName} ${msg.tempC ?? ''}`);
+    console.log(`[notify] ${msg.channel} ${msg.kind} -> ${msg.target.slice(0, 4)}***: ${msg.deviceName} ${msg.tempC ?? ''}`);
   }
 }
 
@@ -35,7 +50,8 @@ const RETRY_STEP_SECONDS = 300;
 
 interface ClaimedRow {
   id: number;
-  phone: string;
+  channel: Channel;
+  target: string;
   attempts: number;
   kind: AlertEventKind;
   ts: number;
@@ -53,7 +69,13 @@ interface ClaimedRow {
  * nguyên tử (pending -> sending): mỗi tin chỉ một bên gửi. Số lần thử tăng ngay lúc nhận, nên dù tiến
  * trình chết giữa chừng cũng không gửi lặp vô hạn. Chỉ dùng ít truy vấn D1 (gói miễn phí giới hạn 50/lượt).
  */
-export async function dispatchPending(db: D1Database, notifier: Notifier, now: number): Promise<number> {
+export async function dispatchPending(
+  db: D1Database,
+  notifier: Notifier,
+  now: number,
+  /** Gọi khi có tin thất bại HẲN (hết lượt thử/lỗi vĩnh viễn): dùng để báo người vận hành. */
+  onFailed?: (failed: { channel: Channel; target: string; error: string }[]) => Promise<void>,
+): Promise<number> {
   await db
     .prepare("UPDATE notifications SET status = 'pending' WHERE status = 'sending' AND updated_at < ?")
     .bind(now - STALE_SENDING_SECONDS)
@@ -75,7 +97,7 @@ export async function dispatchPending(db: D1Database, notifier: Notifier, now: n
   const ids = claimed.results.map((r) => r.id);
   const { results } = await db
     .prepare(
-      `SELECT n.id, n.phone, n.attempts, e.kind, e.ts, e.temp_c, e.detail,
+      `SELECT n.id, n.channel, n.target, n.attempts, e.kind, e.ts, e.temp_c, e.detail,
               d.name AS device_name, d.min_c, d.max_c
        FROM notifications n
        JOIN alert_events e ON e.id = n.event_id
@@ -86,11 +108,13 @@ export async function dispatchPending(db: D1Database, notifier: Notifier, now: n
     .all<ClaimedRow>();
 
   const updates: D1PreparedStatement[] = [];
+  const failedForGood: { channel: Channel; target: string; error: string }[] = [];
   let sent = 0;
   for (const n of results) {
     try {
       await notifier.send({
-        phone: n.phone,
+        channel: n.channel,
+        target: n.target,
         kind: n.kind,
         deviceName: n.device_name,
         tempC: n.temp_c,
@@ -105,10 +129,12 @@ export async function dispatchPending(db: D1Database, notifier: Notifier, now: n
       sent++;
     } catch (err) {
       const message = (err instanceof Error ? err.message : String(err)).slice(0, 300);
+      const final = err instanceof PermanentNotifyError || n.attempts >= MAX_ATTEMPTS;
+      if (final) failedForGood.push({ channel: n.channel, target: n.target, error: message });
       updates.push(
         db
           .prepare('UPDATE notifications SET status = ?, last_error = ?, updated_at = ? WHERE id = ?')
-          .bind(n.attempts >= MAX_ATTEMPTS ? 'failed' : 'pending', message, now, n.id),
+          .bind(final ? 'failed' : 'pending', message, now, n.id),
       );
     }
   }
@@ -118,5 +144,12 @@ export async function dispatchPending(db: D1Database, notifier: Notifier, now: n
     if (!found.has(id)) updates.push(db.prepare("UPDATE notifications SET status = 'failed', last_error = 'orphan' WHERE id = ?").bind(id));
   }
   if (updates.length > 0) await db.batch(updates);
+  if (failedForGood.length > 0 && onFailed) {
+    try {
+      await onFailed(failedForGood);
+    } catch {
+      /* báo người vận hành hỏng không được làm hỏng việc gửi tin */
+    }
+  }
   return sent;
 }

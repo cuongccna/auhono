@@ -6,6 +6,11 @@ export interface Env {
   ZNS_TEMPLATE_ALERT: string;
   ZNS_TEMPLATE_OFFLINE: string;
   ZNS_TEMPLATE_RECOVERED: string;
+  /** Telegram (tùy chọn): bot token, bí mật webhook, tên bot (không có @), chat_id người vận hành. */
+  TELEGRAM_BOT_TOKEN?: string;
+  TELEGRAM_WEBHOOK_SECRET?: string;
+  TELEGRAM_BOT_USERNAME?: string;
+  OPERATOR_TELEGRAM_CHAT_ID?: string;
   ZALO_APP_ID?: string;
   ZALO_APP_SECRET?: string;
   /** Chỉ dùng để khởi tạo lần đầu; sau đó token xoay vòng được giữ trong bảng kv. */

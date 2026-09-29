@@ -28,7 +28,7 @@ export interface Harness {
   owner(token: string, method: string, path: string, body?: unknown): Promise<Response>;
 }
 
-export function harness(): Harness {
+export function harness(over: Partial<Env> = {}, fetchFn?: typeof fetch): Harness {
   const clock = { now: NOW };
   const notifier = new FakeNotifier();
   const pending: Promise<unknown>[] = [];
@@ -40,10 +40,11 @@ export function harness(): Harness {
     now: () => clock.now,
     verifyOwner: async (t) => owners[t] ?? null,
     notifier: () => notifier,
+    fetchFn,
   };
   const app = createApp(deps);
   const ctx = { waitUntil: (p: Promise<unknown>) => void pending.push(p), passThroughOnException() {} } as unknown as ExecutionContext;
-  const request = (path: string, init?: RequestInit) => Promise.resolve(app.request(path, init, testEnv, ctx));
+  const request = (path: string, init?: RequestInit) => Promise.resolve(app.request(path, init, { ...testEnv, ...over }, ctx));
 
   return {
     clock,

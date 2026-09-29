@@ -5,7 +5,7 @@ import { NOW, testEnv } from './helpers.ts';
 import type { Env } from '../src/types.ts';
 
 const msg: NotificationMessage = {
-  phone: '84912345678', kind: 'temp_alarm', deviceName: 'Tủ kem', tempC: -9.46, detail: 'high', ts: 1_800_000_000, minC: -40, maxC: -18,
+  channel: 'zns', target: '84912345678', kind: 'temp_alarm', deviceName: 'Tủ kem', tempC: -9.46, detail: 'high', ts: 1_800_000_000, minC: -40, maxC: -18,
 };
 const env = { ...testEnv, ZNS_TEMPLATE_ALERT: 'T1', ZNS_TEMPLATE_OFFLINE: 'T2', ZNS_TEMPLATE_RECOVERED: 'T3', ZALO_APP_ID: 'app', ZALO_APP_SECRET: 'sec', ZALO_OA_REFRESH_TOKEN: 'r0' } as Env;
 

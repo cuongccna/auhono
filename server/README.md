@@ -48,13 +48,20 @@ Chưa cấu hình ZNS thì cảnh báo chỉ được ghi log (`LogNotifier`), h
 | Mở cửa tủ lấy hàng / xả đá | Chỉ báo khi vượt ngưỡng **liên tục** 15 phút (chỉnh 5–60 phút cho từng tủ) |
 | Cảm biến nhiễu / máy nén chạy-ngắt quanh ngưỡng | Về trong ngưỡng < 2 phút không reset bộ đếm |
 | Lắp thiết bị vào tủ đang ấm, vừa rã đông, hoặc đổi ngưỡng | Chưa "armed" cho tới khi tủ đạt ngưỡng ít nhất một lần; quá 12 giờ vẫn ấm thì báo. Đổi ngưỡng hủy báo động cũ (không gửi "đã ổn") |
-| Tủ hỏng kéo dài qua đêm | Nhắc 30 phút x4, sau đó mỗi 2 giờ, tổng tối đa 16 nhắc (~26 giờ); không im lặng sau 2 giờ |
+| Tủ hỏng kéo dài qua đêm | Nhắc lại theo lịch thưa dần: +30 phút, +2 giờ, +4 giờ, +8 giờ, +12 giờ (~26 giờ) rồi dừng. Nhắc lại chỉ gửi **người nhận chính** (đăng ký đầu tiên) |
+| Chủ quán đã biết sự cố | Nút "Đã biết" (`POST /v1/devices/:id/ack`, 1–24 giờ) dừng nhắc lại; hết hạn mà chưa xong thì nhắc tiếp |
+| Nghỉ Tết / chuyển tủ / rút điện có chủ ý | Nút "Tạm dừng" (`POST /v1/devices/:id/pause`, 1–60 ngày): không tốn tin nhắn, tự bật lại khi hết hạn |
+| Bão báo động (dao động ngưỡng, lỗi bất thường) | Trần 20 tin/thiết bị/24 giờ (`DAILY_MESSAGE_CAP`); vượt trần thì tin bị `suppressed` (vẫn ghi sự kiện) |
 | Nhiệt độ về bình thường thoáng qua | Chỉ báo "đã ổn" khi bình thường liên tục 5 phút |
-| Mất điện / mất Wi-Fi / đứt dây đầu dò | Im lặng > 15 phút thì báo "mất kết nối"; nhắc lại như trên; có số đo lại thì báo "đã kết nối lại" |
+| Mất điện / mất Wi-Fi / đứt dây đầu dò | Im lặng > 15 phút thì báo "mất kết nối"; nhắc lại +2 giờ, +6 giờ, +12 giờ; có số đo lại thì báo "đã kết nối lại" |
 | Thiết bị mới lắp nhưng chưa từng kết nối (Wi-Fi 5 GHz, sai mật khẩu) | Sau 60 phút kể từ lúc gắn chủ thì báo |
 | Chưa có người nhận cảnh báo | `GET /v1/devices` trả `recipient_count: 0` để app cảnh báo chủ quán |
 | ZNS lỗi tạm thời | Hàng đợi thử lại tối đa 8 lần, giãn cách 5/10/15... phút (chịu được ZNS lỗi vài giờ); thất bại hẳn hiện ở `notify_failures_24h` |
 | Cron và request thiết bị chạy cùng lúc | Khóa lạc quan theo `version` + nhận việc nguyên tử: không báo trùng, không "mất kết nối" oan |
+
+## Chi phí tin nhắn
+
+Xem [`../docs/COST.md`](../docs/COST.md). Theo dõi thực tế bằng `npm run usage`.
 
 ## Vận hành (SQL hữu ích)
 

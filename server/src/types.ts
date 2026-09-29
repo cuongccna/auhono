@@ -16,6 +16,7 @@ export interface DeviceRow {
   id: string;
   account_id: number | null;
   claimed_at: number | null;
+  paused_until: number | null;
   name: string;
   kind: 'freezer' | 'chiller';
   min_c: number;

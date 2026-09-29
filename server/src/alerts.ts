@@ -4,8 +4,9 @@
 //  - Chống báo nhầm: chỉ báo khi vượt ngưỡng LIÊN TỤC >= breachSeconds.
 //  - Chịu dao động quanh ngưỡng: về trong ngưỡng ngắn hơn dipSeconds (cảm biến nhiễu, máy nén
 //    chạy/ngắt) KHÔNG làm đếm lại từ đầu.
-//  - Chống làm phiền nhưng không im lặng khi tủ hỏng lâu: báo một lần, nhắc mỗi 30 phút (fastReminders
-//    lần đầu), sau đó mỗi 2 giờ, tối đa maxReminders lần; "đã ổn" khi bình thường liên tục >= recoverSeconds.
+//  - Chống làm phiền và TIẾT KIỆM TIỀN TIN NHẮN (mỗi tin ZNS ~220đ): báo một lần, nhắc theo lịch thưa dần
+//    (reminderDelays), dừng khi chủ quán bấm "đã biết" (ackedUntil); "đã ổn" khi bình thường liên tục
+//    >= recoverSeconds. Tổng số tin cho một sự cố luôn bị chặn trên.
 //  - Chưa "vào chế độ báo động" (armed = false) cho tới khi tủ đạt ngưỡng ít nhất một lần: lắp thiết
 //    bị vào tủ đang ấm/vừa rã đông không gây báo động oan. Quá warmupMaxSeconds vẫn ấm thì báo.
 //  - Mất kết nối: không có số đo hợp lệ quá offlineSeconds; thiết bị đã gắn chủ mà chưa từng gửi
@@ -25,6 +26,8 @@ export interface AlertState {
   lastTs: number | null;
   /** Đã từng thấy nhiệt độ trong ngưỡng kể từ lúc gắn/đổi ngưỡng => cho phép báo động. */
   armed: boolean;
+  /** Chủ quán đã "đã biết": không nhắc lại trước mốc này (unix giây). */
+  ackedUntil: number | null;
 }
 
 export interface AlertConfig {
@@ -32,12 +35,10 @@ export interface AlertConfig {
   maxC: number;
   breachSeconds: number;
   recoverSeconds: number;
-  /** Chu kỳ nhắc lại cho `fastReminders` lần đầu. */
-  reminderSeconds: number;
-  fastReminders: number;
-  /** Chu kỳ nhắc lại sau đó (tủ hỏng lâu: vẫn nhắc, nhưng thưa hơn). */
-  laterReminderSeconds: number;
-  maxReminders: number;
+  /** Khoảng cách (giây) từ lần báo trước tới lần nhắc thứ i của báo động nhiệt độ; hết mảng thì dừng. */
+  reminderDelays: readonly number[];
+  /** Như trên cho mất kết nối: thưa hơn vì mất điện thường không xử lý được ngay. */
+  offlineReminderDelays: readonly number[];
   offlineSeconds: number;
   /** Đã gắn chủ mà chưa từng có số đo: sau bao lâu thì báo. */
   neverSeenSeconds: number;
@@ -75,10 +76,10 @@ export interface StepResult {
 
 export const DEFAULTS = {
   recoverSeconds: 5 * 60,
-  reminderSeconds: 30 * 60,
-  fastReminders: 4,
-  laterReminderSeconds: 2 * 3600,
-  maxReminders: 16, // 4 x 30 phút + 12 x 2 giờ = 26 giờ
+  // Nhiệt độ: +30 phút, +2 giờ, +4 giờ, +8 giờ, +12 giờ (tức 0,5 / 2,5 / 6,5 / 14,5 / 26,5 giờ sau lần báo đầu).
+  reminderDelays: [1800, 7200, 14400, 28800, 43200],
+  // Mất kết nối: +2 giờ, +6 giờ, +12 giờ.
+  offlineReminderDelays: [7200, 21600, 43200],
   offlineSeconds: 15 * 60,
   neverSeenSeconds: 60 * 60,
   dipSeconds: 2 * 60,
@@ -95,6 +96,7 @@ export function initialState(): AlertState {
     remindersSent: 0,
     lastTs: null,
     armed: false,
+    ackedUntil: null,
   };
 }
 
@@ -116,6 +118,7 @@ export function step(prev: AlertState, r: Reading, cfg: AlertConfig): StepResult
   if (s.phase === 'offline') {
     // Có số đo trở lại => hết mất kết nối.
     s.phase = 'ok';
+    s.ackedUntil = null;
     s.lastNotifiedAt = null;
     s.remindersSent = 0;
     s.breachKind = null;
@@ -155,6 +158,7 @@ export function step(prev: AlertState, r: Reading, cfg: AlertConfig): StepResult
     if (r.ts - s.breachSince >= needed) {
       s.phase = 'temp_alarm';
       s.armed = true;
+      s.ackedUntil = null;
       s.inRangeSince = null;
       s.lastNotifiedAt = r.ts;
       s.remindersSent = 0;
@@ -172,6 +176,7 @@ export function step(prev: AlertState, r: Reading, cfg: AlertConfig): StepResult
   if (s.inRangeSince === null) s.inRangeSince = r.ts;
   if (r.ts - s.inRangeSince >= cfg.recoverSeconds) {
     s.phase = 'ok';
+    s.ackedUntil = null;
     s.breachKind = null;
     s.breachSince = null;
     s.inRangeSince = null;
@@ -180,11 +185,6 @@ export function step(prev: AlertState, r: Reading, cfg: AlertConfig): StepResult
     events.push({ kind: 'recovered', ts: r.ts, tempC: r.c, detail: null });
   }
   return { state: s, events };
-}
-
-/** Khoảng cách tới lần nhắc kế tiếp: dày lúc đầu, thưa dần khi sự cố kéo dài. */
-function reminderInterval(sent: number, cfg: AlertConfig): number {
-  return sent < cfg.fastReminders ? cfg.reminderSeconds : cfg.laterReminderSeconds;
 }
 
 /**
@@ -206,6 +206,7 @@ export function tick(
 
   if (s.phase !== 'offline' && now - silentSince >= limit) {
     s.phase = 'offline';
+    s.ackedUntil = null;
     s.breachKind = null;
     s.breachSince = null;
     s.inRangeSince = null;
@@ -215,10 +216,11 @@ export function tick(
     return { state: s, events };
   }
 
-  const due =
-    s.lastNotifiedAt !== null &&
-    now - s.lastNotifiedAt >= reminderInterval(s.remindersSent, cfg) &&
-    s.remindersSent < cfg.maxReminders;
+  // Lịch nhắc theo loại sự cố; chủ quán đã bấm "đã biết" thì im lặng tới mốc ackedUntil.
+  const schedule = s.phase === 'temp_alarm' ? cfg.reminderDelays : s.phase === 'offline' ? cfg.offlineReminderDelays : [];
+  const acked = s.ackedUntil !== null && now < s.ackedUntil;
+  const delay = schedule[s.remindersSent];
+  const due = !acked && delay !== undefined && s.lastNotifiedAt !== null && now - s.lastNotifiedAt >= delay;
   if (!due) return { state: s, events };
 
   if (s.phase === 'temp_alarm' && s.inRangeSince === null) {

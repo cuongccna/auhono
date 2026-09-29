@@ -8,8 +8,8 @@ Tham số dùng chung: `device_name` (tên tủ), `temperature` (vd. `-9.5°C`),
 
 | Biến cấu hình            | Khi nào gửi                                                                 | Gợi ý nội dung                                                                                         |
 |--------------------------|-----------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------|
-| `ZNS_TEMPLATE_ALERT`     | Nhiệt độ vượt ngưỡng liên tục 15 phút; nhắc lại (30 phút x4, sau đó 2 giờ)   | "{device_name} đang {temperature} lúc {time}, vượt ngưỡng ({threshold}). Hãy kiểm tra tủ."             |
-| `ZNS_TEMPLATE_OFFLINE`   | Không nhận được số đo > 15 phút, hoặc thiết bị mới gắn > 60 phút chưa kết nối | "{device_name} không gửi được dữ liệu (tính đến {time}). Có thể mất điện, mất Wi-Fi hoặc đứt dây đầu dò. Hãy kiểm tra." |
+| `ZNS_TEMPLATE_ALERT`     | Nhiệt độ vượt ngưỡng liên tục 15 phút; nhắc lại +30 phút, +2 giờ, +4 giờ, +8 giờ, +12 giờ (chỉ người nhận chính)   | "{device_name} đang {temperature} lúc {time}, vượt ngưỡng ({threshold}). Hãy kiểm tra tủ."             |
+| `ZNS_TEMPLATE_OFFLINE`   | Không nhận được số đo > 15 phút (nhắc +2 giờ, +6 giờ, +12 giờ), hoặc thiết bị mới gắn > 60 phút chưa kết nối | "{device_name} không gửi được dữ liệu (tính đến {time}). Có thể mất điện, mất Wi-Fi hoặc đứt dây đầu dò. Hãy kiểm tra." |
 | `ZNS_TEMPLATE_RECOVERED` | Nhiệt độ về bình thường / thiết bị kết nối lại                               | "{device_name} đã trở lại bình thường lúc {time} ({temperature})."                                     |
 
 Lời lẽ mẫu OFFLINE cố ý trung tính vì máy chủ không phân biệt được các nguyên nhân: mất điện, mất Wi-Fi, ISP

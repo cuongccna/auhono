@@ -55,7 +55,7 @@ export async function ingest(
     }
     // Luôn ghi trạng thái (tăng version) kể cả khi không đổi: nếu cron vừa kết luận "mất kết nối"
     // dựa trên dữ liệu cũ thì phép so version của ta thất bại và ta đọc lại thay vì bỏ sót.
-    if (await commitState(db, device.id, before, state, events, now, idempotent())) break;
+    if (await commitState(db, device.id, before, state, events, now, idempotent(), device.paused_until)) break;
     events = [];
     if (attempt === MAX_ATTEMPTS - 1) {
       // Vẫn va chạm sau nhiều lần (rất hiếm): số đo đã lưu; trạng thái sẽ được lần gửi sau/cron xử lý.

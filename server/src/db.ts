@@ -16,6 +16,7 @@ interface StateRow {
   last_notified_at: number | null;
   reminders_sent: number;
   armed: number;
+  acked_until: number | null;
   version: number;
 }
 
@@ -53,6 +54,7 @@ export function stateFromRow(r: LooseStateRow | null): LoadedState {
       remindersSent: r.reminders_sent ?? 0,
       lastTs: r.last_ts ?? null,
       armed: (r.armed ?? 0) === 1,
+      ackedUntil: r.acked_until ?? null,
     },
   };
 }
@@ -66,26 +68,40 @@ export async function getState(db: D1Database, deviceId: string): Promise<Loaded
 function saveStateStmt(db: D1Database, deviceId: string, s: AlertState, expected: number): D1PreparedStatement {
   return db
     .prepare(
-      `INSERT INTO alert_state (device_id, phase, breach_kind, breach_since, in_range_since, last_ts, last_notified_at, reminders_sent, armed, version)
-       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+      `INSERT INTO alert_state (device_id, phase, breach_kind, breach_since, in_range_since, last_ts, last_notified_at, reminders_sent, armed, acked_until, version)
+       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?12, ?10)
        ON CONFLICT(device_id) DO UPDATE SET
          phase = ?2, breach_kind = ?3, breach_since = ?4, in_range_since = ?5,
-         last_ts = ?6, last_notified_at = ?7, reminders_sent = ?8, armed = ?9, version = ?10
+         last_ts = ?6, last_notified_at = ?7, reminders_sent = ?8, armed = ?9, acked_until = ?12, version = ?10
        WHERE alert_state.version = ?11`,
     )
     .bind(
       deviceId, s.phase, s.breachKind, s.breachSince, s.inRangeSince, s.lastTs, s.lastNotifiedAt,
-      s.remindersSent, s.armed ? 1 : 0, expected + 1, expected,
+      s.remindersSent, s.armed ? 1 : 0, expected + 1, expected, s.ackedUntil,
     );
 }
 
+/** Nhắc lại chỉ gửi cho người nhận chính (đăng ký đầu tiên): tiết kiệm tiền tin, tránh làm phiền cả nhà. */
+const REMINDER_KINDS = new Set(['temp_reminder', 'offline_reminder']);
+
 /**
- * Ghi sự kiện + tin chờ gửi cho MỌI người nhận hiện tại, chỉ khi version còn đúng.
- * Tin nhắn gắn với sự kiện qua `token` ngẫu nhiên (không dùng last_insert_rowid: SQLite có thể
+ * Ghi sự kiện + tin cho người nhận, chỉ khi version còn đúng.
+ * - Báo mới / "đã ổn" / "kết nối lại": mọi người nhận. Nhắc lại: chỉ người nhận chính.
+ * - `suppress`: vẫn ghi sự kiện và tin (để tra cứu) nhưng đánh dấu 'suppressed', không bao giờ gửi
+ *   (đang tạm dừng, hoặc vượt trần tin/ngày).
+ * Tin gắn với sự kiện qua `token` ngẫu nhiên (không dùng last_insert_rowid: SQLite có thể
  * đổi giá trị đó giữa chừng khi INSERT...SELECT nhiều dòng).
  */
-function eventStmts(db: D1Database, deviceId: string, e: AlertEvent, now: number, expected: number): D1PreparedStatement[] {
+function eventStmts(
+  db: D1Database,
+  deviceId: string,
+  e: AlertEvent,
+  now: number,
+  expected: number,
+  suppress: boolean,
+): D1PreparedStatement[] {
   const token = crypto.randomUUID();
+  const primaryOnly = REMINDER_KINDS.has(e.kind);
   return [
     db
       .prepare(
@@ -96,14 +112,21 @@ function eventStmts(db: D1Database, deviceId: string, e: AlertEvent, now: number
       .bind(token, deviceId, e.kind, e.ts, e.tempC, e.detail, expected),
     db
       .prepare(
-        `INSERT INTO notifications (event_id, phone, updated_at)
-         SELECT ev.id, r.phone, ?2 FROM alert_events ev
+        `INSERT INTO notifications (event_id, phone, status, updated_at)
+         SELECT ev.id, r.phone, ?3, ?2 FROM alert_events ev
          JOIN recipients r ON r.device_id = ev.device_id
-         WHERE ev.token = ?1`,
+         WHERE ev.token = ?1
+           AND (?4 = 0 OR r.id = (SELECT MIN(id) FROM recipients WHERE device_id = ev.device_id))`,
       )
-      .bind(token, now),
+      .bind(token, now, suppress ? 'suppressed' : 'pending', primaryOnly ? 1 : 0),
   ];
 }
+
+/**
+ * Trần tin nhắn mỗi thiết bị mỗi 24 giờ: chặn "bão báo động" (tủ dao động ngưỡng, lỗi cảm biến...)
+ * đốt tiền ZNS. Vượt trần thì tin bị 'suppressed'; sự kiện vẫn được ghi.
+ */
+export const DAILY_MESSAGE_CAP = 20;
 
 /**
  * Một giao dịch: [thao tác phụ idempotent] + sự kiện + trạng thái mới, có khóa lạc quan.
@@ -117,9 +140,24 @@ export async function commitState(
   events: AlertEvent[],
   now: number,
   extra: D1PreparedStatement[] = [],
+  /** Thiết bị đang tạm dừng tới mốc này: sự kiện vẫn ghi nhưng không gửi tin. */
+  pausedUntil: number | null = null,
 ): Promise<boolean> {
   const stmts = [...extra];
-  for (const e of events) stmts.push(...eventStmts(db, deviceId, e, now, before.version));
+  if (events.length > 0) {
+    let suppress = pausedUntil !== null && now < pausedUntil;
+    if (!suppress) {
+      const used = await db
+        .prepare(
+          `SELECT COUNT(*) AS n FROM notifications n JOIN alert_events e ON e.id = n.event_id
+           WHERE e.device_id = ? AND e.ts >= ? AND n.status != 'suppressed'`,
+        )
+        .bind(deviceId, now - 24 * 3600)
+        .first<{ n: number }>();
+      suppress = (used?.n ?? 0) >= DAILY_MESSAGE_CAP;
+    }
+    for (const e of events) stmts.push(...eventStmts(db, deviceId, e, now, before.version, suppress));
+  }
   stmts.push(saveStateStmt(db, deviceId, next, before.version));
   const res = await db.batch(stmts);
   return res[res.length - 1]!.meta.changes === 1;
@@ -136,7 +174,7 @@ export function resetStateStmt(db: D1Database, deviceId: string): D1PreparedStat
       `INSERT INTO alert_state (device_id, version) VALUES (?1, 1)
        ON CONFLICT(device_id) DO UPDATE SET
          phase = 'ok', breach_kind = NULL, breach_since = NULL, in_range_since = NULL,
-         last_notified_at = NULL, reminders_sent = 0, armed = 0, last_ts = NULL,
+         last_notified_at = NULL, reminders_sent = 0, armed = 0, last_ts = NULL, acked_until = NULL,
          version = alert_state.version + 1`,
     )
     .bind(deviceId);

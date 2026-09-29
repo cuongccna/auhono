@@ -17,6 +17,7 @@ type Row = DeviceRow & {
   last_notified_at: number | null;
   reminders_sent: number | null;
   armed: number | null;
+  acked_until: number | null;
   version: number | null;
   latest_c: number | null;
 };
@@ -29,7 +30,7 @@ export async function checkDevices(db: D1Database, now: number): Promise<number>
   const { results } = await db
     .prepare(
       `SELECT d.*, s.phase, s.breach_kind, s.breach_since, s.in_range_since, s.last_ts,
-              s.last_notified_at, s.reminders_sent, s.armed, s.version,
+              s.last_notified_at, s.reminders_sent, s.armed, s.acked_until, s.version,
               (SELECT temp_c FROM readings r WHERE r.device_id = d.id ORDER BY ts DESC LIMIT 1) AS latest_c
        FROM devices d LEFT JOIN alert_state s ON s.device_id = d.id
        WHERE d.account_id IS NOT NULL AND d.revoked = 0`,
@@ -39,6 +40,9 @@ export async function checkDevices(db: D1Database, now: number): Promise<number>
   let events = 0;
   for (const d of results) {
     try {
+      // Đang tạm dừng (nghỉ Tết, rút điện có chủ ý): không đánh giá gì. Hết hạn tạm dừng thì thiết bị vẫn im
+      // lặng sẽ bị báo "mất kết nối" ngay ở lượt cron kế tiếp.
+      if (d.paused_until !== null && now < d.paused_until) continue;
       const before = stateFromRow(d);
       const res = tick(before.state, now, d.last_seen, alertConfigFor(d), d.claimed_at);
       if (JSON.stringify(res.state) === JSON.stringify(before.state)) continue;

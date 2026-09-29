@@ -10,7 +10,8 @@
     "test": "vitest run",
     "db:migrate:local": "wrangler d1 migrations apply auhono --local",
     "db:migrate:remote": "wrangler d1 migrations apply auhono --remote",
-    "provision": "node scripts/provision.ts"
+    "provision": "node scripts/provision.ts",
+    "usage": "wrangler d1 execute auhono --remote --file scripts/usage.sql"
   },
   "dependencies": {
     "hono": "^4.13.10",

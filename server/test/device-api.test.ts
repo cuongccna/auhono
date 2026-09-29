@@ -175,7 +175,7 @@ describe('cảnh báo đầu-cuối', () => {
     expect(h.notifier.sent).toHaveLength(0);
   });
 
-  it('cron: thiết bị im lặng 15 phút => báo mất kết nối; nhắc lại sau 30 phút; có số đo lại => báo lại kết nối', async () => {
+  it('cron: thiết bị im lặng 15 phút => báo mất kết nối; nhắc lại sau 2 giờ; có số đo lại => báo lại kết nối', async () => {
     const id = await createActiveDevice(h);
     await run(id, 1, NOW, 5, -20);
     const seen = h.clock.now;
@@ -189,7 +189,7 @@ describe('cảnh báo đầu-cuối', () => {
     await checkDevices(testEnv.DB, h.clock.now + 60); // chạy lại không tạo trùng
     expect(await count("SELECT COUNT(*) n FROM alert_events WHERE device_id = ? AND kind = 'offline'", id)).toBe(1);
 
-    h.clock.now = seen + 46 * 60;
+    h.clock.now = seen + 15 * 60 + 7200 + 60; // nhắc mất kết nối đầu tiên sau 2 giờ
     await checkDevices(testEnv.DB, h.clock.now);
     expect(await count("SELECT COUNT(*) n FROM alert_events WHERE device_id = ? AND kind = 'offline_reminder'", id)).toBe(1);
 

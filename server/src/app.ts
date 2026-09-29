@@ -12,7 +12,7 @@ import {
 import { ingest } from './ingest.ts';
 import { dispatchPending, type Notifier } from './notify.ts';
 import { AuthUnavailableError, zaloVerifier, type OwnerVerifier } from './owner-auth.ts';
-import { resetStateStmt } from './db.ts';
+import { getState, resetStateStmt } from './db.ts';
 import { KIND_PRESETS, type DeviceRow, type Env } from './types.ts';
 
 export interface Deps {
@@ -263,6 +263,7 @@ export function createApp(deps: Deps) {
   type ListRow = DeviceRow & {
     phase: string | null;
     armed: number | null;
+    acked_until: number | null;
     latest_ts: number | null;
     latest_c: number | null;
     recipient_count: number;
@@ -282,6 +283,9 @@ export function createApp(deps: Deps) {
     phase: d.phase ?? 'ok',
     // false = chưa cảnh báo nhiệt độ vì tủ chưa đạt ngưỡng lần nào (mới lắp / mới đổi ngưỡng).
     armed: d.armed === 1,
+    // Đang tạm dừng cảnh báo tới mốc này (null = không). Chủ quán "đã biết" một sự cố: không nhắc lại tới mốc này.
+    paused_until: d.paused_until,
+    acked_until: d.acked_until,
     // 0 = sẽ không có tin nhắn nào được gửi: app phải cảnh báo chủ quán.
     recipient_count: d.recipient_count,
     // > 0 = có tin không gửi được trong 24 giờ qua (sai số, chưa theo dõi OA...).
@@ -293,7 +297,7 @@ export function createApp(deps: Deps) {
     const now = deps.now();
     const { results } = await c.env.DB
       .prepare(
-        `SELECT d.*, s.phase AS phase, s.armed AS armed,
+        `SELECT d.*, s.phase AS phase, s.armed AS armed, s.acked_until AS acked_until,
            (SELECT ts FROM readings r WHERE r.device_id = d.id ORDER BY ts DESC LIMIT 1) AS latest_ts,
            (SELECT temp_c FROM readings r WHERE r.device_id = d.id ORDER BY ts DESC LIMIT 1) AS latest_c,
            (SELECT COUNT(*) FROM recipients rc WHERE rc.device_id = d.id) AS recipient_count,
@@ -352,7 +356,49 @@ export function createApp(deps: Deps) {
     if (!device) return c.json({ error: 'not_found' }, 404);
     await c.env.DB.batch([
       c.env.DB.prepare('DELETE FROM recipients WHERE device_id = ?').bind(device.id),
-      c.env.DB.prepare('UPDATE devices SET account_id = NULL, claimed_at = NULL WHERE id = ?').bind(device.id),
+      c.env.DB.prepare('UPDATE devices SET account_id = NULL, claimed_at = NULL, paused_until = NULL WHERE id = ?').bind(device.id),
+      resetStateStmt(c.env.DB, device.id),
+    ]);
+    return c.json({ ok: true });
+  });
+
+  // "Đã biết": dừng nhắc lại một sự cố đang diễn ra trong N giờ (mặc định 4). Nhắc tiếp nếu hết hạn mà chưa xong.
+  app.post('/v1/devices/:id/ack', ownerAuth, async (c) => {
+    const device = await ownedDevice(c);
+    if (!device) return c.json({ error: 'not_found' }, 404);
+    const parsed = z.object({ hours: z.number().int().min(1).max(24).default(4) }).safeParse((await c.req.json().catch(() => ({}))) ?? {});
+    if (!parsed.success) return c.json({ error: 'bad_request' }, 400);
+
+    const { state } = await getState(c.env.DB, device.id);
+    if (state.phase === 'ok') return c.json({ error: 'no_active_alert' }, 409);
+    const until = deps.now() + parsed.data.hours * 3600;
+    // Ghi thẳng và tăng version: xử lý đang chạy song song sẽ phải đọc lại, không đè mất dấu "đã biết".
+    await c.env.DB
+      .prepare('UPDATE alert_state SET acked_until = ?, version = version + 1 WHERE device_id = ?')
+      .bind(until, device.id)
+      .run();
+    return c.json({ ok: true, acked_until: until });
+  });
+
+  // Tạm dừng cảnh báo (nghỉ Tết, chuyển tủ, rút điện có chủ ý): không tốn tin nhắn, tự bật lại khi hết hạn.
+  app.post('/v1/devices/:id/pause', ownerAuth, async (c) => {
+    const device = await ownedDevice(c);
+    if (!device) return c.json({ error: 'not_found' }, 404);
+    const parsed = z.object({ days: z.number().int().min(1).max(60) }).safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: 'bad_request' }, 400);
+    const until = deps.now() + parsed.data.days * 86400;
+    await c.env.DB.batch([
+      c.env.DB.prepare('UPDATE devices SET paused_until = ? WHERE id = ?').bind(until, device.id),
+      resetStateStmt(c.env.DB, device.id), // hủy báo động/mất kết nối đang có; bật lại thì đánh giá từ đầu
+    ]);
+    return c.json({ ok: true, paused_until: until });
+  });
+
+  app.delete('/v1/devices/:id/pause', ownerAuth, async (c) => {
+    const device = await ownedDevice(c);
+    if (!device) return c.json({ error: 'not_found' }, 404);
+    await c.env.DB.batch([
+      c.env.DB.prepare('UPDATE devices SET paused_until = NULL WHERE id = ?').bind(device.id),
       resetStateStmt(c.env.DB, device.id),
     ]);
     return c.json({ ok: true });

@@ -87,32 +87,48 @@ describe('chống làm phiền (nhắc lại)', () => {
     expect(r.events).toEqual([]);
   });
 
-  it('4 lần đầu nhắc mỗi 30 phút', () => {
-    let s = alarmed();
-    const out: string[] = [];
-    for (const m of [30, 60, 90, 120]) {
-      const r = tick(s, alarmAt + min(m), alarmAt + min(m), cfg);
-      s = r.state;
-      out.push(...kinds(r.events));
-    }
-    expect(out).toEqual(['temp_reminder', 'temp_reminder', 'temp_reminder', 'temp_reminder']);
-  });
-
-  it('sự cố kéo dài: sau 4 lần nhắc dày thì nhắc thưa mỗi 2 giờ, không im lặng', () => {
+  it('nhắc theo lịch thưa dần: 30 phút, 2 giờ, 4 giờ, 8 giờ, 12 giờ rồi dừng', () => {
     let s = alarmed();
     let now = alarmAt;
     const times: number[] = [];
-    // Cron chạy mỗi 5 phút suốt 30 giờ.
-    for (; now < alarmAt + 30 * 3600; now += min(5)) {
-      const r = tick(s, now, now, cfg); // thiết bị vẫn gửi số đo (vẫn nóng)
+    // Cron chạy mỗi 5 phút suốt 40 giờ; thiết bị vẫn đang gửi số đo (vẫn nóng).
+    for (; now < alarmAt + 40 * 3600; now += min(5)) {
+      const r = tick(s, now, now, cfg);
       s = r.state;
       if (r.events.length) times.push(now - alarmAt);
     }
-    const gaps = times.slice(1).map((t, i) => t - times[i]!);
-    expect(times).toHaveLength(cfg.maxReminders); // dừng ở mức trần
-    expect(gaps.slice(0, 3)).toEqual([1800, 1800, 1800]);
-    expect(gaps.slice(3)).toEqual(Array(cfg.maxReminders - 4).fill(7200));
-    expect(times[times.length - 1]).toBeGreaterThanOrEqual(24 * 3600); // vẫn nhắc sau 24 giờ
+    expect(times).toEqual([1800, 1800 + 7200, 1800 + 7200 + 14400, 1800 + 7200 + 14400 + 28800, 1800 + 7200 + 14400 + 28800 + 43200]);
+    expect(times).toHaveLength(cfg.reminderDelays.length); // trần số tin cho một sự cố
+  });
+
+  it('chủ quán bấm "đã biết" thì không nhắc tới mốc ackedUntil, hết hạn mà chưa xong thì nhắc tiếp', () => {
+    const s = { ...alarmed(), ackedUntil: alarmAt + 3 * 3600 };
+    const during = tick(s, alarmAt + 2 * 3600, alarmAt + 2 * 3600, cfg);
+    expect(during.events).toEqual([]);
+    const after = tick(s, alarmAt + 3 * 3600 + 1, alarmAt + 3 * 3600 + 1, cfg);
+    expect(kinds(after.events)).toEqual(['temp_reminder']);
+  });
+
+  it('"đã biết" bị xóa khi sự cố kết thúc và không giữ sang sự cố sau', () => {
+    let r = feed({ ...armedState(), ackedUntil: T0 + 999999 }, T0, rep(-10, 16));
+    // báo động mới => ack cũ không còn hiệu lực
+    expect(r.state.ackedUntil).toBeNull();
+    r = feed({ ...r.state, ackedUntil: T0 + 999999 }, T0 + min(16), rep(-20, 6));
+    expect(kinds(r.events)).toEqual(['recovered']);
+    expect(r.state.ackedUntil).toBeNull();
+  });
+
+  it('mất kết nối nhắc thưa hơn: +2 giờ, +6 giờ, +12 giờ rồi dừng', () => {
+    const lastSeen = T0;
+    let s = tick(armedState(), lastSeen + min(15), lastSeen, cfg).state; // offline
+    const notifiedAt = lastSeen + min(15);
+    const times: number[] = [];
+    for (let now = notifiedAt; now < notifiedAt + 48 * 3600; now += min(5)) {
+      const r = tick(s, now, lastSeen, cfg);
+      s = r.state;
+      if (r.events.length) times.push(now - notifiedAt);
+    }
+    expect(times).toEqual([7200, 7200 + 21600, 7200 + 21600 + 43200]);
   });
 
   it('đã về bình thường (đang chờ xác nhận) thì không nhắc', () => {
@@ -139,10 +155,11 @@ describe('mất kết nối', () => {
     expect(r2.events).toEqual([]);
   });
 
-  it('vẫn mất kết nối sau 30 phút thì nhắc lại', () => {
+  it('vẫn mất kết nối sau 2 giờ thì nhắc lại (thưa hơn báo động nhiệt độ)', () => {
     const lastSeen = T0 + min(4);
     const r1 = tick(online().state, lastSeen + min(15), lastSeen, cfg);
-    const r2 = tick(r1.state, lastSeen + min(45), lastSeen, cfg);
+    expect(tick(r1.state, lastSeen + min(45), lastSeen, cfg).events).toEqual([]); // 30 phút: chưa
+    const r2 = tick(r1.state, lastSeen + min(15) + 7200, lastSeen, cfg);
     expect(kinds(r2.events)).toEqual(['offline_reminder']);
   });
 

@@ -17,7 +17,7 @@ const addRecipient = (id: string, phone: string) =>
   h.owner('owner-a-token', 'POST', `/v1/devices/${id}/recipients`, { name: phone, phone });
 
 describe('nhiều người nhận: tin gắn đúng sự kiện', () => {
-  it('3 người nhận x 2 sự kiện = 6 tin, mỗi tin trỏ đúng sự kiện của thiết bị này', async () => {
+  it('báo mới gửi cả 3 người; nhắc lại chỉ gửi người nhận chính; tin trỏ đúng sự kiện của thiết bị này', async () => {
     const id = await createActiveDevice(h, '0912000001');
     await addRecipient(id, '0912000002');
     await addRecipient(id, '0912000003');
@@ -30,11 +30,10 @@ describe('nhiều người nhận: tin gắn đúng sự kiện', () => {
     const rows = (await testEnv.DB.prepare(
       'SELECT n.phone, e.device_id, e.kind FROM notifications n JOIN alert_events e ON e.id = n.event_id WHERE e.device_id IN (?, ?)',
     ).bind(id, other).all()).results as any[];
-    expect(rows).toHaveLength(6);
+    expect(rows).toHaveLength(4);
     expect(new Set(rows.map((r) => r.device_id))).toEqual(new Set([id]));
-    for (const kind of ['temp_alarm', 'temp_reminder']) {
-      expect(rows.filter((r) => r.kind === kind).map((r) => r.phone).sort()).toEqual(['84912000001', '84912000002', '84912000003']);
-    }
+    expect(rows.filter((r) => r.kind === 'temp_alarm').map((r) => r.phone).sort()).toEqual(['84912000001', '84912000002', '84912000003']);
+    expect(rows.filter((r) => r.kind === 'temp_reminder').map((r) => r.phone)).toEqual(['84912000001']);
   });
 });
 
@@ -265,4 +264,98 @@ it('resetStateStmt tạo dòng trạng thái mới nếu chưa có', async () =>
   const id = await createDevice();
   await resetStateStmt(testEnv.DB, id).run();
   expect(await getState(testEnv.DB, id)).toMatchObject({ version: 1, state: { ...initialState(), armed: false } });
+});
+
+describe('kiểm soát chi phí tin nhắn', () => {
+  const armedAlarm = async (id: string, startMinute = 0) => {
+    await testEnv.DB.prepare('UPDATE alert_state SET armed = 1 WHERE device_id = ?').bind(id).run();
+    for (let m = startMinute; m < startMinute + 20; m += 5) {
+      h.clock.now = NOW + m * 60 + 240;
+      await h.signed(id, 'POST', '/v1/readings', 1000 + m, readingsBody(h.clock.now, Array(5).fill(-5)));
+    }
+    await h.settle();
+  };
+  const count = (id: string, status: string) =>
+    n("SELECT COUNT(*) n FROM notifications n JOIN alert_events e ON e.id = n.event_id WHERE e.device_id = ? AND n.status = ?", id, status);
+
+  it('"đã biết": dừng nhắc lại; chỉ khi đang có sự cố; hết hạn thì nhắc tiếp', async () => {
+    const id = await createActiveDevice(h);
+    expect((await h.owner('owner-a-token', 'POST', `/v1/devices/${id}/ack`, { hours: 4 })).status).toBe(409); // chưa có sự cố
+    await armedAlarm(id);
+    expect((await getState(testEnv.DB, id)).state.phase).toBe('temp_alarm');
+
+    const res = await h.owner('owner-a-token', 'POST', `/v1/devices/${id}/ack`, { hours: 3 });
+    expect(res.status).toBe(200);
+    const until = (await json(res)).acked_until as number;
+    expect(until).toBe(h.clock.now + 3 * 3600);
+    const list = await json(await h.owner('owner-a-token', 'GET', '/v1/devices'));
+    expect(list.devices.find((d: any) => d.id === id).acked_until).toBe(until);
+
+    await testEnv.DB.prepare('UPDATE devices SET last_seen = ? WHERE id = ?').bind(until - 1, id).run();
+    await checkDevices(testEnv.DB, until - 1); // đang trong thời gian "đã biết"
+    expect(await n("SELECT COUNT(*) n FROM alert_events WHERE device_id = ? AND kind = 'temp_reminder'", id)).toBe(0);
+    await testEnv.DB.prepare('UPDATE devices SET last_seen = ? WHERE id = ?').bind(until + 1, id).run();
+    await checkDevices(testEnv.DB, until + 1);
+    expect(await n("SELECT COUNT(*) n FROM alert_events WHERE device_id = ? AND kind = 'temp_reminder'", id)).toBe(1);
+
+    expect((await h.owner('owner-b-token', 'POST', `/v1/devices/${id}/ack`, { hours: 1 })).status).toBe(404); // không phải chủ
+    expect((await h.owner('owner-a-token', 'POST', `/v1/devices/${id}/ack`, { hours: 99 })).status).toBe(400);
+  });
+
+  it('tạm dừng: rút điện/nghỉ Tết không tốn tin nhắn nào; hết hạn thì tự bật lại', async () => {
+    const id = await createActiveDevice(h);
+    await h.signed(id, 'POST', '/v1/readings', 1, readingsBody(NOW, [-20]));
+    const p = await h.owner('owner-a-token', 'POST', `/v1/devices/${id}/pause`, { days: 7 });
+    expect(p.status).toBe(200);
+    expect((await h.owner('owner-a-token', 'POST', `/v1/devices/${id}/pause`, { days: 0 })).status).toBe(400);
+    expect((await h.owner('owner-a-token', 'POST', `/v1/devices/${id}/pause`, { days: 61 })).status).toBe(400);
+    const until = (await json(p)).paused_until as number;
+
+    // Thiết bị rút điện 6 ngày, cron chạy đều mỗi 5 phút: không có sự kiện nào.
+    for (let t = NOW + 900; t < NOW + 6 * 86400; t += 3600 * 6) await checkDevices(testEnv.DB, t);
+    expect(await n('SELECT COUNT(*) n FROM alert_events WHERE device_id = ?', id)).toBe(0);
+    expect((await json(await h.owner('owner-a-token', 'GET', '/v1/devices'))).devices.find((d: any) => d.id === id).paused_until).toBe(until);
+
+    // Hết hạn tạm dừng mà thiết bị vẫn im lặng: báo mất kết nối ngay lượt cron kế tiếp.
+    await checkDevices(testEnv.DB, until + 60);
+    expect(await n("SELECT COUNT(*) n FROM alert_events WHERE device_id = ? AND kind = 'offline'", id)).toBe(1);
+  });
+
+  it('đang tạm dừng mà thiết bị vẫn gửi số đo vượt ngưỡng: sự kiện ghi nhưng tin bị chặn (suppressed)', async () => {
+    const id = await createActiveDevice(h);
+    await h.owner('owner-a-token', 'POST', `/v1/devices/${id}/pause`, { days: 3 });
+    await armedAlarm(id);
+    expect(await n("SELECT COUNT(*) n FROM alert_events WHERE device_id = ? AND kind = 'temp_alarm'", id)).toBe(1);
+    expect(await count(id, 'suppressed')).toBe(1);
+    expect(await count(id, 'pending')).toBe(0);
+    expect(h.notifier.sent).toHaveLength(0);
+    // Bỏ tạm dừng sớm.
+    expect((await h.owner('owner-a-token', 'DELETE', `/v1/devices/${id}/pause`)).status).toBe(200);
+    expect((await json(await h.owner('owner-a-token', 'GET', '/v1/devices'))).devices.find((d: any) => d.id === id).paused_until).toBeNull();
+  });
+
+  it('trần tin/ngày: bão báo động không đốt tiền — vượt trần thì các tin sau bị suppressed', async () => {
+    const { DAILY_MESSAGE_CAP } = await import('../src/db.ts');
+    const id = await createActiveDevice(h);
+    const emit = async (i: number) => {
+      const b = await getState(testEnv.DB, id);
+      await commitState(testEnv.DB, id, b, b.state, [{ kind: 'offline', ts: NOW + i, tempC: null, detail: null }], NOW + i);
+    };
+    for (let i = 0; i < DAILY_MESSAGE_CAP + 5; i++) await emit(i);
+    expect(await count(id, 'pending')).toBe(DAILY_MESSAGE_CAP);
+    expect(await count(id, 'suppressed')).toBe(5);
+    // Sang ngày mới: được gửi lại.
+    const b = await getState(testEnv.DB, id);
+    await commitState(testEnv.DB, id, b, b.state, [{ kind: 'offline', ts: NOW + 90000, tempC: null, detail: null }], NOW + 90000);
+    expect(await count(id, 'pending')).toBe(DAILY_MESSAGE_CAP + 1);
+  });
+
+  it('tin suppressed không bao giờ được dispatch', async () => {
+    const id = await createActiveDevice(h);
+    await h.owner('owner-a-token', 'POST', `/v1/devices/${id}/pause`, { days: 1 });
+    await armedAlarm(id);
+    await dispatchPending(testEnv.DB, new FakeNotifier(), NOW + 999999); // dispatch toàn cục (DB dùng chung giữa các test)
+    expect(await count(id, 'suppressed')).toBe(1);
+    expect(await count(id, 'sent')).toBe(0);
+  });
 });

@@ -13,6 +13,7 @@ CREATE TABLE accounts (
 CREATE TABLE devices (
   id             TEXT PRIMARY KEY,                       -- ví dụ AUH-000001
   account_id     INTEGER REFERENCES accounts(id) ON DELETE SET NULL,
+  paused_until   INTEGER,                                -- tạm dừng cảnh báo (đóng cửa nghỉ Tết, rút điện có chủ ý)
   claimed_at     INTEGER,                                -- lúc gắn chủ (phát hiện thiết bị chưa từng kết nối)
   name           TEXT NOT NULL DEFAULT 'Tủ lạnh',
   kind           TEXT NOT NULL DEFAULT 'freezer' CHECK (kind IN ('freezer', 'chiller')),
@@ -63,6 +64,7 @@ CREATE TABLE alert_state (
   breach_since     INTEGER,   -- ts của số đo đầu tiên trong chuỗi vượt ngưỡng liên tục
   in_range_since   INTEGER,   -- đang báo động mà số đo đã về bình thường từ lúc nào
   last_ts          INTEGER,   -- ts số đo mới nhất đã đưa vào máy trạng thái (bỏ qua số đo cũ hơn)
+  acked_until      INTEGER,   -- chủ quán bấm "đã biết": không nhắc lại tới mốc này
   armed            INTEGER NOT NULL DEFAULT 0,  -- đã thấy nhiệt độ trong ngưỡng => cho phép báo động
   version          INTEGER NOT NULL DEFAULT 0,  -- khóa lạc quan: mọi thay đổi trạng thái đều so-và-tăng version
   last_notified_at INTEGER,
@@ -86,7 +88,7 @@ CREATE TABLE notifications (
   id         INTEGER PRIMARY KEY AUTOINCREMENT,
   event_id   INTEGER NOT NULL REFERENCES alert_events(id) ON DELETE CASCADE,
   phone      TEXT NOT NULL,
-  status     TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'sending', 'sent', 'failed')),
+  status     TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'sending', 'sent', 'failed', 'suppressed')),
   attempts   INTEGER NOT NULL DEFAULT 0,
   last_error TEXT,
   updated_at INTEGER NOT NULL

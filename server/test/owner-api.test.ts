@@ -27,6 +27,7 @@ describe('kích hoạt (claim)', () => {
     });
     expect(res.status).toBe(200);
     const list = await json(await h.owner('owner-a-token', 'GET', '/v1/devices'));
+    expect(list.server_time).toBe(NOW);
     const d = list.devices.find((x: any) => x.id === id);
     expect(d).toMatchObject({ name: 'Tủ mát thuốc', kind: 'chiller', min_c: 2, max_c: 8, phase: 'ok', latest: null });
   });
@@ -117,7 +118,7 @@ describe('biểu đồ', () => {
     await testEnv.DB.prepare('INSERT INTO readings (device_id, ts, temp_c) VALUES (?, ?, ?)').bind(id, NOW - 30 * 3600, -5).run();
 
     const day = await json(await h.owner('owner-a-token', 'GET', `/v1/devices/${id}/readings?hours=24`));
-    expect(day).toMatchObject({ min_c: -40, max_c: -18 });
+    expect(day).toMatchObject({ server_time: NOW, min_c: -40, max_c: -18 });
     expect(day.points.length).toBeGreaterThanOrEqual(2);
     expect(day.points.length).toBeLessThanOrEqual(3);
     expect(day.points.every((p: any) => p.avg === -20)).toBe(true);

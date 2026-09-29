@@ -1,0 +1,17 @@
+{
+  "app": {
+    "title": "Auhono",
+    "headerTitle": "Auhono",
+    "headerColor": "#ffffff",
+    "textColor": "black",
+    "statusBarColor": "#ffffff",
+    "textAlign": "left",
+    "leftButton": "back",
+    "statusBar": "normal",
+    "actionBarHidden": true
+  },
+  "debug": false,
+  "listCSS": [],
+  "listSyncJS": [],
+  "listAsyncJS": []
+}

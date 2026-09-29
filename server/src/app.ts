@@ -231,6 +231,8 @@ export function createApp(deps: Deps) {
       .bind(c.get('accountId'))
       .all<DeviceRow & { phase: string | null; latest_ts: number | null; latest_c: number | null }>();
     return c.json({
+      // Giờ server để app tính "mất kết nối"/"x phút trước" không phụ thuộc đồng hồ điện thoại.
+      server_time: deps.now(),
       devices: results.map((r) =>
         publicDevice(r, r.latest_ts === null ? null : { ts: r.latest_ts, temp_c: r.latest_c! }, r.phase),
       ),
@@ -292,7 +294,7 @@ export function createApp(deps: Deps) {
       )
       .bind(device.id, since)
       .all();
-    return c.json({ min_c: device.min_c, max_c: device.max_c, points: results });
+    return c.json({ server_time: deps.now(), min_c: device.min_c, max_c: device.max_c, points: results });
   });
 
   // Lịch sử dài hơn 7 ngày: trung bình theo giờ.

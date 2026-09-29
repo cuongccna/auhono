@@ -1,0 +1,282 @@
+/* Giao diện Auhono: mobile-first, chữ lớn, nút cao >= 48px cho người dùng lớn tuổi/không rành công nghệ. */
+:root {
+  --auh-primary: var(--zaui-light-color-primary, #006af5);
+  --auh-bg: #f2f4f7;
+  --auh-card: #ffffff;
+  --auh-text: #141415;
+  --auh-muted: #5b6470;
+  --auh-border: #dde1e6;
+  --auh-ok: #1a7f37;
+  --auh-ok-bg: #e3f5e8;
+  --auh-alarm: #c62828;
+  --auh-alarm-bg: #fdeaea;
+  --auh-off: #8a5a00;
+  --auh-off-bg: #fff3d6;
+  --auh-neutral-bg: #e9ebed;
+  --auh-tap: 48px;
+  --auh-top: calc(var(--zaui-safe-area-inset-top, 0px) + 56px);
+}
+
+body {
+  background: var(--auh-bg);
+  color: var(--auh-text);
+  font-size: 16px;
+}
+
+.auh-page {
+  background: var(--auh-bg);
+}
+
+.auh-main {
+  padding: var(--auh-top) 16px 32px;
+  max-width: 640px;
+  margin: 0 auto;
+  box-sizing: border-box;
+}
+.auh-main.auh-with-nav {
+  padding-bottom: calc(var(--zaui-safe-area-inset-bottom, 0px) + 88px);
+}
+
+.auh-card {
+  background: var(--auh-card);
+  border-radius: 14px;
+  padding: 16px;
+  margin-bottom: 12px;
+  box-shadow: 0 1px 2px rgba(20, 20, 21, 0.06);
+}
+.auh-card h2,
+.auh-h2 {
+  font-size: 18px;
+  line-height: 24px;
+  margin: 0 0 8px;
+  font-weight: 600;
+}
+.auh-muted {
+  color: var(--auh-muted);
+  font-size: 15px;
+  line-height: 21px;
+  margin: 0 0 8px;
+}
+.auh-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.auh-row-between {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.auh-stack > * + * {
+  margin-top: 12px;
+}
+
+/* Nút: dùng zmp-ui Button size="large"; đây chỉ bổ sung cho nút tự dựng. */
+.auh-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  min-height: var(--auh-tap);
+  padding: 10px 16px;
+  border: 0;
+  border-radius: 12px;
+  font-size: 17px;
+  font-weight: 600;
+  background: var(--auh-primary);
+  color: #fff;
+  cursor: pointer;
+}
+.auh-btn[disabled] {
+  opacity: 0.55;
+}
+.auh-btn-secondary {
+  background: #e6f0fe;
+  color: var(--auh-primary);
+}
+.auh-btn-danger {
+  background: var(--auh-alarm-bg);
+  color: var(--auh-alarm);
+}
+
+/* Ô nhập tự dựng (thay vì Input của zmp-ui ở chỗ cần kiểm soát chặt) */
+.auh-field {
+  margin-bottom: 12px;
+}
+.auh-field label {
+  display: block;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+.auh-input {
+  width: 100%;
+  box-sizing: border-box;
+  min-height: var(--auh-tap);
+  padding: 10px 14px;
+  font-size: 17px;
+  border: 1.5px solid var(--auh-border);
+  border-radius: 12px;
+  background: #fff;
+  color: var(--auh-text);
+}
+.auh-input:focus {
+  outline: 2px solid var(--auh-primary);
+  border-color: var(--auh-primary);
+}
+.auh-input[aria-invalid='true'] {
+  border-color: var(--auh-alarm);
+}
+.auh-error {
+  color: var(--auh-alarm);
+  font-size: 14px;
+  margin-top: 4px;
+}
+.auh-help {
+  color: var(--auh-muted);
+  font-size: 14px;
+  margin-top: 4px;
+}
+
+/* Thẻ chọn (loại tủ) */
+.auh-choices {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.auh-choice {
+  text-align: left;
+  min-height: 84px;
+  padding: 12px;
+  border-radius: 12px;
+  border: 2px solid var(--auh-border);
+  background: #fff;
+  color: var(--auh-text);
+  font-size: 16px;
+  cursor: pointer;
+}
+.auh-choice strong {
+  display: block;
+  font-size: 18px;
+  margin-bottom: 4px;
+}
+.auh-choice small {
+  color: var(--auh-muted);
+  font-size: 14px;
+  line-height: 18px;
+}
+.auh-choice[aria-pressed='true'] {
+  border-color: var(--auh-primary);
+  background: #e6f0fe;
+}
+
+/* Huy hiệu trạng thái: luôn có chữ (không chỉ dựa vào màu) */
+.auh-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  border-radius: 999px;
+  font-size: 15px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.auh-badge-ok { background: var(--auh-ok-bg); color: var(--auh-ok); }
+.auh-badge-alarm { background: var(--auh-alarm-bg); color: var(--auh-alarm); }
+.auh-badge-offline { background: var(--auh-off-bg); color: var(--auh-off); }
+.auh-badge-no_data,
+.auh-badge-unknown { background: var(--auh-neutral-bg); color: var(--auh-muted); }
+
+/* Thẻ thiết bị ở màn hình chính */
+.auh-device {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: 0;
+  cursor: pointer;
+  color: inherit;
+  font: inherit;
+}
+.auh-temp-big {
+  font-size: 40px;
+  line-height: 44px;
+  font-weight: 700;
+  letter-spacing: -0.5px;
+}
+.auh-temp-mid {
+  font-size: 28px;
+  line-height: 32px;
+  font-weight: 700;
+}
+
+.auh-banner {
+  border-radius: 12px;
+  padding: 12px 14px;
+  margin-bottom: 12px;
+  font-size: 15px;
+  line-height: 21px;
+}
+.auh-banner-error { background: var(--auh-alarm-bg); color: var(--auh-alarm); }
+.auh-banner-warn { background: var(--auh-off-bg); color: var(--auh-off); }
+.auh-banner-info { background: #e6f0fe; color: #0b4fb3; }
+
+.auh-center {
+  text-align: center;
+  padding: 32px 8px;
+}
+
+.auh-list-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--auh-border);
+}
+.auh-list-item:last-child {
+  border-bottom: 0;
+}
+
+.auh-details summary {
+  min-height: var(--auh-tap);
+  display: flex;
+  align-items: center;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+/* Biểu đồ */
+.auh-chart {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+.auh-chart text {
+  font-size: 10px;
+  fill: var(--auh-muted);
+}
+.auh-chart .band { fill: var(--auh-ok); fill-opacity: 0.12; }
+.auh-chart .limit { stroke: var(--auh-ok); stroke-width: 1; stroke-dasharray: 4 3; }
+.auh-chart .grid { stroke: var(--auh-border); stroke-width: 0.5; }
+.auh-chart .envelope { fill: var(--auh-primary); fill-opacity: 0.15; stroke: none; }
+.auh-chart .line { fill: none; stroke: var(--auh-primary); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.auh-chart .dot { fill: var(--auh-primary); }
+.auh-chart .gap { fill: var(--auh-off); fill-opacity: 0.12; }
+.auh-chart .latest { fill: #fff; stroke: var(--auh-primary); stroke-width: 2.5; }
+
+.auh-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  font-size: 13px;
+  color: var(--auh-muted);
+  margin-top: 6px;
+}
+.auh-legend i {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  margin-right: 4px;
+  vertical-align: -1px;
+}

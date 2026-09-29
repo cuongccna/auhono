@@ -1,0 +1,8 @@
+{
+  "cli": {
+    "version": "4.0.3"
+  },
+  "framework": "react",
+  "typescript": true,
+  "bundler": "vite"
+}

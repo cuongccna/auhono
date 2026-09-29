@@ -360,19 +360,8 @@ static void handleSampling(uint32_t now) {
   }
 }
 
-static void handleUpload(uint32_t now) {
-  if (!g_uploader || !g_wifi.connected() || !g_platform.clockTrusted()) return;
-
-  if (!g_uploadGateArmed) {  // lần đầu sau khởi động có thể gửi: rải ngẫu nhiên 0-20 s theo từng máy (thundering herd)
-    g_uploadGateArmed = true;
-    const uint32_t jitter = g_rng.next() % cfg::kUploadStartJitterMaxMs;
-    g_policy.delayStart(now, jitter);
-    Serial.printf("[upload] gui lan dau sau %lu ms\n", static_cast<unsigned long>(jitter));
-  }
-
-  const auhono::UploadReason reason = g_policy.poll(now, !g_buffer.empty());
-  if (reason == auhono::UploadReason::None) return;
-
+/// Gửi số đo trong bộ đệm rồi cập nhật trạng thái/chính sách theo kết quả. Dùng cho cả gửi định kỳ lẫn "gửi trước khi OTA".
+static void flushAndApply(uint32_t now) {
   const auhono::FlushResult f = g_uploader->flush();
   if (f.thresholdsChanged) saveThresholds(g_thresholds);  // chỉ ghi flash khi ngưỡng thật sự đổi
   if (f.staleDropped > 0 || f.discardedReadings > 0 || f.serverDroppedReadings > 0) {
@@ -403,6 +392,21 @@ static void handleUpload(uint32_t now) {
   }
 }
 
+static void handleUpload(uint32_t now) {
+  if (!g_uploader || !g_wifi.connected() || !g_platform.clockTrusted()) return;
+
+  if (!g_uploadGateArmed) {  // lần đầu sau khởi động có thể gửi: rải ngẫu nhiên 0-20 s theo từng máy (thundering herd)
+    g_uploadGateArmed = true;
+    const uint32_t jitter = g_rng.next() % cfg::kUploadStartJitterMaxMs;
+    g_policy.delayStart(now, jitter);
+    Serial.printf("[upload] gui lan dau sau %lu ms\n", static_cast<unsigned long>(jitter));
+  }
+
+  const auhono::UploadReason reason = g_policy.poll(now, !g_buffer.empty());
+  if (reason == auhono::UploadReason::None) return;
+  flushAndApply(now);
+}
+
 /// Gọi liên tục khi đang tải OTA (vòng lặp chính bị chiếm): giữ nhịp đo. Trả false để HỦY tải khi vừa có số đo vượt ngưỡng.
 static bool otaTick(void*) {
   const uint32_t now = millis();
@@ -425,6 +429,11 @@ static void handleOta(uint32_t now) {
   if (g_platform.monoSeconds() < 30) return;
 
   g_nextOtaAt = now + cfg::kOtaCheckIntervalMs;  // đặt trước: lỗi cũng không hỏi dồn dập
+
+  // "Gửi trước, cài sau": trước khi kiểm tra OTA (6 giờ một lần) gửi nốt số đo đang chờ qua kênh BÌNH THƯỜNG (đã xác thực).
+  // Nếu không, bộ đệm hầu như luôn có 1-5 số đo giữa hai lần gửi 5 phút và cửa ngõ OTA (còn số đo chưa gửi => hoãn) có thể hoãn
+  // mãi mãi. Không bao giờ gửi số đo khi đang ở chế độ cứu hộ (kênh không xác thực chứng chỉ).
+  if (!rescue && g_uploader && !g_buffer.empty() && g_uploadGateArmed && !g_policy.startDelayPending(now)) flushAndApply(now);
 
   if (rescue) Serial.println("[ota] CHE DO CUU HO: chung chi TLS hong keo dai, chi kiem tra/tai OTA (co chu ky) khong xac thuc chung chi");
   g_http.setInsecureRescue(rescue);

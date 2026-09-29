@@ -60,4 +60,5 @@ class WifiManager {
   uint32_t seenEventSeq_ = 0;
   uint32_t downSince_ = 0;
   uint32_t nextAttemptAt_ = 0;
+  uint32_t lastAttemptAt_ = 0;
 };

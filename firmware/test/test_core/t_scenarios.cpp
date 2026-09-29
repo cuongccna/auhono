@@ -11,6 +11,7 @@
 #include "auhono/device_client.h"
 #include "auhono/hex.h"
 #include "auhono/jitter_random.h"
+#include "auhono/maintenance.h"
 #include "auhono/plausibility.h"
 #include "auhono/readings.h"
 #include "auhono/retry_policy.h"
@@ -414,6 +415,31 @@ static void test_client_builder_called_per_attempt_and_stops_on_empty_body() {
   TEST_ASSERT_EQUAL_UINT(before, r.http.log.size());          // không dựng được body: không gửi gì
 }
 
+static void test_cert_error_is_reported_up_to_the_rescue_policy() {
+  Rig r;
+  r.plat.mono = 50000;
+  r.plat.setUnix(1800000000u);
+  r.buf.push(Reading{49990, -1900});
+  r.http.script.push_back({-1, "", true});   // TLS: xác thực chứng chỉ thất bại (CA gốc đã đổi)
+  FlushResult f = r.up->flush();
+  TEST_ASSERT_FALSE(f.ok);
+  TEST_ASSERT_TRUE(f.certError);
+  TEST_ASSERT_TRUE(f.lastStatus <= 0);
+  TEST_ASSERT_EQUAL_UINT(1, r.buf.size());     // số đo vẫn được giữ
+  TlsRescue rescue;
+  for (int i = 0; i < 12; i++) rescue.onAttempt(f.ok && f.reachedServer, f.certError, f.lastStatus > 0);
+  TEST_ASSERT_TRUE(rescue.rescueAllowed());
+  r.http.script.push_back({-1, "", false});    // lỗi mạng thường: không phải lỗi chứng chỉ
+  f = r.up->flush();
+  TEST_ASSERT_FALSE(f.certError);
+  // 5 phút một lần (backoff nhanh tối đa 5 phút): 12 lần thất bại chứng chỉ mất ~50 phút, không hơn nhiều
+  ConstHw hw;
+  Backoff b(hw);
+  uint64_t total = 0;
+  for (int i = 0; i < 12; i++) total += b.nextDelayMs();
+  TEST_ASSERT_TRUE(total < 70ull * 60 * 1000);
+}
+
 static void test_untrusted_channel_must_not_set_the_clock() {
   // OTA cứu hộ chạy không xác thực chứng chỉ: phản hồi (dù là 200 mang server_time hay 401 clock_skew) không được đổi giờ.
   Rig r;
@@ -459,5 +485,6 @@ void run_scenario_tests() {
   RUN_TEST(test_401_forever_hourly_request_count);
   RUN_TEST(test_429_reply_is_rate_limited_kind);
   RUN_TEST(test_client_builder_called_per_attempt_and_stops_on_empty_body);
+  RUN_TEST(test_cert_error_is_reported_up_to_the_rescue_policy);
   RUN_TEST(test_untrusted_channel_must_not_set_the_clock);
 }

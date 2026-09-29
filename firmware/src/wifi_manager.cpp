@@ -12,6 +12,7 @@ volatile uint8_t s_lastReason = 0;
 volatile uint32_t s_eventSeq = 0;
 bool s_eventsRegistered = false;
 bool s_lowPower = false;
+constexpr uint32_t kDhcpGraceMs = 45000;  // thời gian tối đa chờ DHCP sau khi đã kết hợp với router trước khi thử lại
 
 void onStaDisconnected(arduino_event_id_t, arduino_event_info_t info) {
   s_lastReason = info.wifi_sta_disconnected.reason;
@@ -53,6 +54,7 @@ void WifiManager::begin(const auhono::WifiCreds& creds, uint32_t nowMs) {
   WiFi.setAutoReconnect(false); // nhịp thử do ta điều khiển (backoff bên dưới)
   WiFi.begin(creds_.ssid.c_str(), creds_.password.empty() ? nullptr : creds_.password.c_str());  // giữ nguyên AP nếu đang mở
   applyTxPower();
+  lastAttemptAt_ = nowMs;
   nextAttemptAt_ = nowMs + backoff_.nextDelayMs();
 }
 
@@ -95,7 +97,15 @@ void WifiManager::loop(uint32_t nowMs) {
     Serial.println("[wifi] mat ket noi");
   }
   if (holdOff_) return;
-  if (auhono::reached(nowMs, nextAttemptAt_)) attempt(nowMs);
+  if (auhono::reached(nowMs, nextAttemptAt_)) {
+    // Đã kết hợp với router (WL_IDLE_STATUS) nhưng chưa có IP: DHCP của router vừa khởi động có thể chậm hàng chục giây.
+    // Ngắt giữa chừng sẽ khiến ta không bao giờ nhận được IP (vòng lặp chết) => cho thêm thời gian trước khi thử lại.
+    if (WiFi.status() == WL_IDLE_STATUS && static_cast<uint32_t>(nowMs - lastAttemptAt_) < kDhcpGraceMs) {
+      nextAttemptAt_ = nowMs + 3000;
+      return;
+    }
+    attempt(nowMs);
+  }
 }
 
 void WifiManager::attempt(uint32_t nowMs) {
@@ -103,6 +113,7 @@ void WifiManager::attempt(uint32_t nowMs) {
   WiFi.disconnect(false);
   WiFi.begin(creds_.ssid.c_str(), creds_.password.empty() ? nullptr : creds_.password.c_str());
   applyTxPower();
+  lastAttemptAt_ = nowMs;
   nextAttemptAt_ = nowMs + backoff_.nextDelayMs();
 }
 

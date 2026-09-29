@@ -1391,7 +1391,7 @@ describe('Thông tin kỹ thuật (diag)', () => {
     const summary = await t('Thông tin kỹ thuật');
     const details = summary.closest('details')!;
     expect(details.hasAttribute('open')).toBe(false);
-    for (const [label, value] of [['Sóng Wi-Fi', 'Yếu (-82 dBm)'], ['Lần khởi động lại gần nhất do', 'Điện yếu/sụt áp'], ['Đã chạy liên tục', '2 ngày 1 giờ'], ['Phiên bản phần mềm', '1.0.2']]) {
+    for (const [label, value] of [['Sóng Wi-Fi', 'Yếu (-82 dBm)'], ['Lần khởi động lại gần nhất do', 'Điện yếu/sụt áp'], ['Đã chạy liên tục', '2 ngày 1 giờ'], ['Phiên bản phần mềm', '1.0.2']] as [string, string][]) {
       const dt = within(details).getByText(label);
       expect(dt.nextElementSibling!.textContent).toContain(value);
     }

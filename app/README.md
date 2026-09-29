@@ -4,9 +4,10 @@
 
 | Màn hình | Đường dẫn | Việc làm được |
 |---|---|---|
-| Thiết bị của tôi | `/` | Danh sách thiết bị, nhiệt độ mới nhất, trạng thái (Bình thường / Đang báo động / Mất kết nối / Chưa có dữ liệu), cảnh báo cấu hình (chưa có người nhận, gửi tin lỗi, chưa bật báo động). Tự làm mới mỗi 60 giây khi đang xem |
+| Thiết bị của tôi | `/` | Danh sách thiết bị, nhiệt độ mới nhất, trạng thái (Bình thường / Đang báo động / **Lỗi cảm biến** / Mất kết nối / Chưa có dữ liệu / Tạm dừng / Cần kiểm tra); sự cố xếp lên đầu, cảnh báo cấu hình (chưa có người nhận, gửi tin lỗi, chưa bật báo động). Tự làm mới mỗi 60 giây khi đang xem |
 | Kích hoạt | `/activate` | Quét QR trên hộp (hoặc nhập tay mã thiết bị + mã kích hoạt, hoặc dán cả đường dẫn QR), chọn Tủ đông / Tủ mát, đặt tên |
 | Chi tiết + biểu đồ 24 giờ | `/device/:id` | Biểu đồ SVG (dải ngưỡng, dải min–max, đứt đường + gạch chéo khi mất kết nối > 15 phút, hình thoi cho điểm ngoài ngưỡng, trục giờ Việt Nam), hướng dẫn cài đặt khi chưa có số đo, giải thích cách cảnh báo hoạt động, nút "Đã biết, đang xử lý" (dừng tin nhắc lại vài giờ), "Tạm dừng cảnh báo" 1/3/7/14/30 ngày + "Bật lại", gỡ thiết bị (có bước xác nhận) |
+| Wi-Fi cài đặt thiết bị | `/device/:id/setup` | Tên + mật khẩu Wi-Fi mà thiết bị phát khi cài đặt (chủ quán mất tem xem lại được): ký tự lớn tách rời, nút sao chép từng mục, các bước cài đặt (giữ nút 5 giây, 192.168.4.1, chỉ 2.4 GHz). Không vẽ mã QR |
 | Đổi tên | `/device/:id/rename` | Đổi tên thiết bị (chuẩn hóa NFC, 1–60 ký tự) |
 | Đặt ngưỡng | `/device/:id/thresholds` | Hiện nhiệt độ hiện tại của tủ; chọn loại tủ có sẵn ngưỡng; mục "Nâng cao" chỉnh min/max (gõ được `-18,5`, `−18`, số toàn chiều rộng) và số phút báo (5–60); cảnh báo khi nhiệt độ hiện tại đã nằm ngoài ngưỡng định đặt |
 | Người nhận cảnh báo | `/device/:id/recipients` | Xem / thêm / xóa (tối đa 5), nhãn "Người nhận chính" cho người đầu tiên, kênh Telegram miễn phí cho từng người (kết nối / chọn kênh / ngắt), số điện thoại di động VN tự chuẩn hóa về `84xxxxxxxxx`, chặn trùng, cảnh báo khi xóa người cuối cùng |
@@ -158,6 +159,9 @@ Mọi dòng "Test" là test tự động trong Node/jsdom (SDK và `fetch` giả
 | Quán nghỉ Tết / cố ý rút điện | Mục **"Tạm dừng cảnh báo"**: chọn 1/3/7/14/30 ngày, hộp thoại xác nhận "Trong thời gian này bạn sẽ KHÔNG nhận cảnh báo…"; sau đó biểu ngữ "Đang tạm dừng cảnh báo tới dd/MM" + nút "Bật lại"; trạng thái là **"Tạm dừng cảnh báo"**, KHÔNG hiện "Mất kết nối" như sự cố (cả ở màn hình chính); tạm dừng hết hạn thì tính bình thường; server cũ (thiếu `paused_until`) => ẩn mục này | `status.test.ts`, `alert-actions.test.ts`, `scenarios.test.tsx` |
 | Nhiều người nhận, nhắc lại thưa | Người đầu tiên có nhãn "Người nhận chính" + giải thích "Người đầu tiên trong danh sách nhận cả tin nhắc lại; những người khác chỉ nhận tin báo đầu và tin đã ổn."; trợ giúp nêu lịch nhắc (nhiệt độ: sau 30 phút rồi cách 2/4/8/12 giờ; mất kết nối: sau 2 giờ rồi cách 6/12 giờ). "Người đầu" được SUY từ thứ tự danh sách của server (sắp theo id) | `scenarios.test.tsx` |
 | Telegram (miễn phí, dự phòng) | Chỉ hiện khi `telegram_available === true` (vắng/false/server cũ => ẩn hết). Mỗi người có dòng "Nhận thêm qua Telegram (miễn phí)": chưa kết nối => "Kết nối Telegram" (POST `telegram-link`) hiện bảng liên kết với ghi chú "chỉ dùng một lần, hiệu lực 24 giờ", "phải mở trên điện thoại của chính người nhận", nút Chia sẻ / Sao chép / Mở Telegram trên máy này, hướng dẫn "Mở Telegram, bấm Start. Sau đó quay lại đây và làm mới."; quay lại app thì tự tải lại. Đã kết nối => huy hiệu + chọn "Zalo + Telegram" / "Chỉ Telegram" / "Chỉ Zalo" (PATCH `mode`; "Chỉ Telegram" có hộp cảnh báo bắt buộc) + "Ngắt kết nối" (xác nhận, DELETE). 503 `telegram_not_configured` và 409 `telegram_not_linked` có thông điệp riêng (không phải lỗi token). URL của server chỉ được dùng nếu đúng `https://t.me/<bot>?start=<mã>` (kiểm ở cả parser lẫn trước khi gọi `openOutApp`); URL lạ => `bad_response`, không mở | `telegram.test.ts`, `schemas.test.ts`, `errors.test.ts`, `api-client.test.ts`, `sdk.test.ts`, `security.test.ts`, `scenarios.test.tsx` |
+| Đầu dò đứt/rút/kẹt gioăng (thiết bị vẫn gửi nhịp tim) | `phase = sensor_fault` => trạng thái riêng **"Lỗi cảm biến"** (màu tím + ký hiệu ⚠ + chữ, không chỉ dựa vào màu): "Lỗi cảm biến — thiết bị vẫn kết nối nhưng không đọc được nhiệt độ", nguyên nhân ("dây đầu dò bị đứt, rút ra hoặc kẹt ở gioăng cửa tủ"), việc cần làm (kiểm tra dây và đầu cắm, đừng chỉ chờ), giờ số đo hợp lệ cuối (`last_reading_at`, theo giờ server). Ưu tiên: Tạm dừng > Chưa có dữ liệu > Mất kết nối > Lỗi cảm biến > Báo động > Bình thường. Nút "Đã biết" dùng được (server chỉ chặn `phase = ok`). Màn hình chính xếp báo động + lỗi cảm biến lên đầu (ổn định). Phase lạ của server mới => "Cần kiểm tra", vẫn hiện thiết bị | `status.test.ts`, `alert-actions.test.ts`, `scenarios.test.tsx` |
+| Thông tin kỹ thuật (`diag`) | Mục gập "Thông tin kỹ thuật" ở chi tiết: sóng Wi-Fi Tốt/Trung bình/Yếu (≥ -60 / ≥ -75 / còn lại, kèm dBm; yếu => gợi ý dời modem/bộ kích sóng), lý do khởi động lại (Cắm điện, Điện yếu/sụt áp — gợi ý đổi củ sạc USB, Lỗi phần mềm, Khởi động lại theo lệnh, Nút reset, Không rõ), thời gian chạy, đầu dò, phiên bản phần mềm. Trường vắng thì bỏ dòng; không có gì thì không hiện mục | `diag.test.ts`, `schemas.test.ts`, `scenarios.test.tsx` |
+| Chủ quán mất tem Wi-Fi cài đặt | `GET /setup` CHỈ khi mở màn hình "Wi-Fi cài đặt thiết bị" (từ chi tiết hoặc từ hướng dẫn "Chưa có dữ liệu"). Không cache, không lưu storage, không log, không vào URL/history; state bị bỏ khi rời màn hình; kèm "Chỉ chia sẻ mật khẩu này với người cần cài đặt thiết bị". Chuỗi `wifi_qr` chỉ hiện trong mục "Nâng cao" gập lại (không vẽ QR). 404 => "Không tìm thấy thiết bị" | `scenarios.test.tsx`, `security.test.ts`, `api-client.test.ts` |
 | Lỗi lập trình bất ngờ | `ErrorBoundary`: "Ứng dụng gặp sự cố" + nút mở lại thay vì màn hình trắng | `scenarios.test.tsx` |
 | Tên/chuỗi độc hại từ server | Chỉ hiển thị dạng chữ | `scenarios.test.tsx`, `security.test.ts` |
 
@@ -168,6 +172,8 @@ Mọi dòng "Test" là test tự động trong Node/jsdom (SDK và `fetch` giả
 | `server_time` (GET `/v1/devices`, `/readings`) | Đồng hồ theo giờ server (mất kết nối, "x phút trước", cửa sổ biểu đồ) | Dùng giờ điện thoại |
 | `armed`, `recipient_count`, `notify_failures_24h` | Cảnh báo cấu hình trên màn hình chính/chi tiết/người nhận | Không hiện gì |
 | `paused_until`, `acked_until`, `claimed_at` | Trạng thái "Tạm dừng", nút "Đã biết", giờ kích hoạt | Ẩn nút/mục tương ứng |
+| `phase = sensor_fault`, `last_reading_at`, `diag`, `diag_at`, `alarm_since` | Trạng thái "Lỗi cảm biến", giờ số đo hợp lệ cuối, mục kỹ thuật, "từ khoảng HH:MM" của báo động (server cũ: suy từ biểu đồ) | Phase lạ => "Cần kiểm tra"; trường vắng => ẩn |
+| GET `/v1/devices/:id/setup` | Màn hình Wi-Fi cài đặt | 404 => "Không tìm thấy thiết bị" |
 | POST `/v1/devices/:id/ack` `{hours}`, POST/DELETE `/v1/devices/:id/pause` `{days}` | Nút "Đã biết", "Tạm dừng"/"Bật lại" | Không gọi |
 | 401 `unauthorized` | Luồng xin quyền lại ("Cho phép") | — |
 | 503 `auth_unavailable` | "Zalo đang bận, thử lại sau ít phút"; giữ số cũ; KHÔNG xin quyền lại | Coi như lỗi hệ thống chung |
@@ -190,7 +196,9 @@ Toàn bộ kiểm thử ở trên chạy trong Node/jsdom với `zmp-sdk` và `f
 - Màu chủ đạo thật `--zaui-light-color-primary` của Zalo (test độ tương phản dùng màu dự phòng `#006af5`).
 - Origin thật của Mini App phía CORS, `Retry-After`/`Cache-Control` của Cloudflare, tin ZNS thật tới người nhận.
 - Telegram: `openOutApp` có thực sự mở Telegram/trình duyệt ngoài trong Zalo (Android/iOS, bản cũ) hay không; `openShareSheet({type:'text'})` có nhận đoạn chữ chứa liên kết; `navigator.clipboard`/`execCommand('copy')` trong webview Zalo; Telegram có mở đúng bot với `?start=` từ liên kết; vòng đời thật (bấm Start => `both`, `/stop` => ngắt) và việc tin thật tới Telegram.
-- Bundle: 124,3 kB gzip cho JS (`vite build`, đo lúc viết); tải thật trên Zalo có thể khác do CDN của Zalo.
+- Wi-Fi cài đặt: cử chỉ giữ nút 5 giây, đèn nháy nhanh, tên/mật khẩu WPA2 ghi theo `docs/PROTOCOL.md` và `firmware/README.md` (bản README firmware hiện vẫn ghi Wi-Fi "mở": cần cập nhật cho khớp); clipboard trong webview Zalo.
+- Lỗi cảm biến/diag: chỉ thử với dữ liệu giả lập, chưa có thiết bị thật rút dây đầu dò; ngưỡng RSSI Tốt/Trung bình/Yếu (-60/-75 dBm) là quy ước của app, chưa đối chiếu thực tế.
+- Bundle: 126,8 kB gzip cho JS (`vite build`, đo lúc viết); tải thật trên Zalo có thể khác do CDN của Zalo.
 
 ## Kiểm thử thủ công trong Zalo thật (checklist)
 
@@ -217,6 +225,8 @@ trên cả Android và iOS, ít nhất một máy Zalo bản mới và một má
 - [ ] Giờ trên trục là giờ Việt Nam kể cả khi điện thoại đặt múi giờ khác.
 - [ ] Rút nguồn thiết bị > 15 phút: đường bị đứt, có vùng "mất kết nối", huy hiệu "Mất kết nối" (kiểm tra cả khi đồng hồ điện thoại chạy đúng).
 - [ ] Làm nóng tủ để có báo động: huy hiệu "Đang báo động", đường vượt dải ngưỡng.
+- [ ] Rút dây đầu dò khi thiết bị vẫn có điện và Wi-Fi: sau ~15 phút hiện "Lỗi cảm biến" (không phải "Mất kết nối"); cắm lại thì hết.
+- [ ] Màn hình "Wi-Fi cài đặt thiết bị": tên/mật khẩu khớp tem; nối điện thoại vào Wi-Fi đó bằng mật khẩu này thì trang cài đặt mở được.
 - [ ] Thiết bị mới kích hoạt chưa có số đo: "Chưa có dữ liệu", biểu đồ không lỗi.
 - [ ] Nút "Làm mới" cập nhật số liệu; mạng yếu/tắt mạng cho thông báo dễ hiểu, nút "Thử lại" và vẫn thấy số liệu cũ kèm giờ cập nhật.
 - [ ] Để màn hình chi tiết mở khi làm nóng tủ: biểu đồ tự cập nhật sau ≤ 60 giây; khoá máy 5 phút rồi mở lại: cập nhật ngay.
@@ -246,7 +256,7 @@ trên cả Android và iOS, ít nhất một máy Zalo bản mới và một má
 
 ## Kích thước bản build
 
-`npm run build` (Vite 5, target es2015): JS **124,3 kB gzip** (397,7 kB thô), CSS 16,5 kB gzip (đo lúc viết, sau khi thêm tự làm mới, đổi tên, tạm dừng, Telegram, chế độ tối...). Phần lớn là react-dom, react-router, `zmp-ui` (và `zod` do `zmp-sdk` kéo vào)
+`npm run build` (Vite 5, target es2015): JS **126,8 kB gzip** (405,8 kB thô), CSS 16,7 kB gzip (đo lúc viết, sau khi thêm tự làm mới, đổi tên, tạm dừng, Telegram, chế độ tối...). Phần lớn là react-dom, react-router, `zmp-ui` (và `zod` do `zmp-sdk` kéo vào)
 cùng toàn bộ `zaui.css` (import nguyên tệp; có thể thu nhỏ sau bằng cách chỉ nạp phần CSS của các component đang dùng). Ngân sách đặt ra: JS gzip dưới ~130 kB.
 
 ## Hạn chế và việc còn lại

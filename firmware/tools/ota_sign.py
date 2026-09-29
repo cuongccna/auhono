@@ -6,6 +6,9 @@
   - Thông điệp được ký: TOÀN BỘ nội dung file .bin (tức là ký lên digest SHA-256 của nó).
   - Mã hóa: DER (ASN.1 SEQUENCE{r,s}, thường 70-72 byte), viết thành chuỗi hex thường 140-144 ký tự.
   - `sha256` trong manifest: hex thường 64 ký tự của SHA-256(file .bin).
+  - Nhãn phiên bản: ảnh phải chứa chuỗi "AUHONO-FWVER:<version>;" (do src/ota.cpp nhúng lúc build từ AUHONO_FW_VERSION).
+    Thiết bị đối chiếu nhãn này (được ký cùng ảnh) với manifest và chỉ nhận phiên bản MỚI HƠN bản đang chạy; script từ chối
+    ký nếu nhãn thiếu/khác --version (bắt lỗi quên đổi AUHONO_FW_VERSION hoặc ký nhầm file).
 Có thể tự kiểm bằng openssl:
     openssl dgst -sha256 -verify keys/ota_public.pem -signature <(echo -n SIG_HEX | xxd -r -p) firmware.bin
 
@@ -31,6 +34,10 @@ except ImportError:
 
 MAX_APP_BYTES = 0x1F0000  # kích thước mỗi khe OTA trong partitions.csv
 VERSION_RE = re.compile(r"^[0-9A-Za-z._+-]{1,32}$")  # khớp parseOtaManifest
+# Khớp auhono::compareVersions (lib/auhono_core/src/auhono/ota_policy.cpp): 1-4 số nguyên, hậu tố -pre hoặc +build tùy chọn.
+SEMVER_RE = re.compile(r"^[0-9]{1,9}(\.[0-9]{1,9}){0,3}([-+][0-9A-Za-z._+-]+)?$")
+TAG_RE = re.compile(rb"AUHONO-FWVER:([0-9A-Za-z._+-]{1,32});")
+ESP32C3_CHIP_ID = 0x0005
 
 
 def die(msg: str) -> None:
@@ -53,6 +60,9 @@ def main() -> None:
 
     if not VERSION_RE.match(args.version):
         die("version chỉ gồm chữ, số và . - _ + (tối đa 32 ký tự)")
+    if not SEMVER_RE.match(args.version):
+        die("version phải dạng số.số[.số[.số]] có thể kèm -tiền_phát_hành hoặc +build (ví dụ 1.0.1, 1.2.0-rc1); "
+            "thiết bị không so sánh được dạng khác nên sẽ từ chối cài")
     if not args.url.startswith("https://") or re.search(r"[\s\x00-\x1f\x7f]", args.url) or len(args.url) > 512:
         die("url phải bắt đầu bằng https://, không có khoảng trắng, tối đa 512 ký tự")
 
@@ -61,6 +71,14 @@ def main() -> None:
         die("không phải ảnh ứng dụng ESP32 (byte đầu phải là 0xE9). Dùng firmware.bin, không dùng .elf/.factory.bin")
     if len(data) > MAX_APP_BYTES:
         die(f"file {len(data)} byte vượt khe OTA {MAX_APP_BYTES} byte")
+    if len(data) < 40 or int.from_bytes(data[12:14], "little") != ESP32C3_CHIP_ID:
+        die("ảnh không dành cho ESP32-C3 (chip_id trong đầu ảnh khác 0x0005). Build sai env?")
+    if data[32:36] != bytes.fromhex("3254cdab"):
+        die("thiếu esp_app_desc (magic 0xABCD5432 tại offset 32): không phải ảnh ứng dụng Arduino/ESP-IDF hợp lệ")
+    tags = set(m.group(1).decode() for m in TAG_RE.finditer(data))
+    if tags != {args.version}:
+        die(f"nhãn phiên bản trong ảnh là {sorted(tags) or 'KHÔNG CÓ'} nhưng --version = {args.version}. "
+            "Sửa AUHONO_FW_VERSION trong platformio.ini, build lại rồi ký file mới.")
 
     key = serialization.load_pem_private_key(open(args.key, "rb").read(), password=None)
     if not isinstance(key, ec.EllipticCurvePrivateKey) or key.curve.name != "secp256r1":

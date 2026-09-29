@@ -120,7 +120,7 @@ static uint32_t g_portalAutoCloseAt = 0;
 
 // ── Tiện ích ───────────────────────────────────────────────────────────────
 
-static bool reached(uint32_t now, uint32_t deadline) { return static_cast<int32_t>(now - deadline) >= 0; }
+using auhono::reached;  // so sánh mốc thời gian an toàn khi millis() tràn (time_policy.h)
 
 static const char* resetReasonText(esp_reset_reason_t r) {
   switch (r) {
@@ -428,6 +428,7 @@ static void handleOta(uint32_t now) {
 
   if (rescue) Serial.println("[ota] CHE DO CUU HO: chung chi TLS hong keo dai, chi kiem tra/tai OTA (co chu ky) khong xac thuc chung chi");
   g_http.setInsecureRescue(rescue);
+  g_client->setAllowClockAdopt(!rescue);  // kênh không xác thực chứng chỉ: kẻ đứng giữa không được đặt giờ của thiết bị
 
   OtaContext ctx;
   ctx.bufferCount = g_buffer.size();
@@ -439,6 +440,7 @@ static void handleOta(uint32_t now) {
   ctx.tick = otaTick;
   const OtaOutcome outcome = otaCheckAndUpdate(*g_client, g_platform, ctx, rescue);
   g_http.setInsecureRescue(false);
+  g_client->setAllowClockAdopt(true);
 
   const auhono::HttpResponse& last = g_client->lastResponse();
   if (rescue) g_rescue.onAttempt(ctx.contacted, last.certError, last.status > 0);

@@ -46,7 +46,7 @@ ServerReply DeviceClient::run(const std::string& method, const std::string& path
     reply = parseReply(last_.status, last_.body.data(), last_.body.size(), requireOkField);
 
     if (reply.kind == ReplyKind::Ok) {
-      if (reply.hasServerTime &&
+      if (allowClockAdopt_ && reply.hasServerTime &&
           shouldAdoptServerTime(platform_.clockTrusted(), platform_.unixNow(), reply.serverTime, false)) {
         platform_.setUnix(static_cast<uint32_t>(reply.serverTime));
       }
@@ -54,7 +54,8 @@ ServerReply DeviceClient::run(const std::string& method, const std::string& path
     }
     if (reply.kind == ReplyKind::ClockSkew) {
       // Server đã xác thực chữ ký và cho biết giờ chuẩn: chỉnh rồi ký lại với seq mới.
-      if (!shouldAdoptServerTime(platform_.clockTrusted(), platform_.unixNow(), reply.serverTime, true)) return reply;
+      if (!allowClockAdopt_ ||
+          !shouldAdoptServerTime(platform_.clockTrusted(), platform_.unixNow(), reply.serverTime, true)) return reply;
       platform_.setUnix(static_cast<uint32_t>(reply.serverTime));
       continue;
     }

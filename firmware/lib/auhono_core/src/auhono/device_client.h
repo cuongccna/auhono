@@ -85,6 +85,10 @@ class DeviceClient {
   /// GET /v1/time (không ký) để chỉnh giờ khi NTP lỗi. true nếu đã chỉnh được đồng hồ.
   bool syncTimeFromServer();
 
+  /// Cho phép chỉnh đồng hồ theo `server_time` trong phản hồi (Ok và 401 clock_skew). Mặc định true. Đặt false khi kết nối
+  /// KHÔNG được xác thực chứng chỉ (OTA cứu hộ): kẻ đứng giữa không được phép đặt giờ của thiết bị.
+  void setAllowClockAdopt(bool allow) { allowClockAdopt_ = allow; }
+
   /// Phản hồi thô của lần gọi gần nhất (để đọc manifest OTA).
   const HttpResponse& lastResponse() const { return last_; }
 
@@ -94,6 +98,7 @@ class DeviceClient {
   IPlatform& platform_;
   IHttp& http_;
   HttpResponse last_;
+  bool allowClockAdopt_ = true;
   char bodyBuf_[kBodyCap];  // DeviceClient nằm trên heap (unique_ptr) nên không tốn stack
 
   ServerReply run(const std::string& method, const std::string& pathAndQuery, const uint8_t* fixedBody,

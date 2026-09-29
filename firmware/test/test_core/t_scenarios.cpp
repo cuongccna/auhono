@@ -7,6 +7,7 @@
 #include <string>
 
 #include "auhono/backoff.h"
+#include "auhono/button.h"
 #include "auhono/device_client.h"
 #include "auhono/hex.h"
 #include "auhono/jitter_random.h"
@@ -209,6 +210,31 @@ static void test_flush_is_bounded_per_call_and_eventually_drains() {
 
 // ── 4. millis() tràn (49,7 ngày) ───────────────────────────────────────────
 
+static void test_deadline_helper_across_millis_rollover() {
+  // mốc đặt trước lúc tràn (0xFFFFFFF0 + 60 s), so sánh trước/sau lúc tràn
+  const uint32_t deadline = 0xFFFFFFF0u + 60000u;   // = 59984 sau khi quấn
+  TEST_ASSERT_FALSE(auhono::reached(0xFFFFFFF0u, deadline));
+  TEST_ASSERT_FALSE(auhono::reached(10, deadline));
+  TEST_ASSERT_FALSE(auhono::reached(59983, deadline));
+  TEST_ASSERT_TRUE(auhono::reached(59984, deadline));
+  TEST_ASSERT_TRUE(auhono::reached(70000, deadline));
+  // mốc lệch xa hơn 2^31 ms trở đi thì đảo nghĩa: đó là giới hạn được ghi lại; không mốc nào của firmware dài quá 6 giờ
+  TEST_ASSERT_FALSE(auhono::reached(0x80000000u + 1, 0));
+  TEST_ASSERT_TRUE(auhono::reached(0x7FFFFFFFu, 0));
+  TEST_ASSERT_TRUE(6ull * 3600 * 1000 < 0x7FFFFFFFull);
+}
+
+static void test_button_gesture_across_millis_rollover() {
+  ButtonGesture b;
+  b.update(false, 0xFFFFF000u);
+  b.update(true, 0xFFFFF800u);
+  TEST_ASSERT_EQUAL(ButtonEvent::None, b.update(true, 0xFFFFF800u + 4999));
+  TEST_ASSERT_EQUAL(ButtonEvent::LongPress, b.update(true, 0xFFFFF800u + 5000));   // qua mốc tràn: vẫn đúng 5 s
+  TEST_ASSERT_EQUAL(ButtonEvent::None, b.update(true, 0xFFFFF800u + 16000));
+  TEST_ASSERT_TRUE(b.wipeArmed());
+  TEST_ASSERT_EQUAL(ButtonEvent::VeryLongPress, b.update(false, 0xFFFFF800u + 17000));
+}
+
 static void test_upload_policy_start_delay_and_wraparound() {
   UploadPolicy p(300000, 60000);
   const uint32_t t0 = 0xFFFFF000u;             // gần mốc tràn 32 bit
@@ -388,6 +414,29 @@ static void test_client_builder_called_per_attempt_and_stops_on_empty_body() {
   TEST_ASSERT_EQUAL_UINT(before, r.http.log.size());          // không dựng được body: không gửi gì
 }
 
+static void test_untrusted_channel_must_not_set_the_clock() {
+  // OTA cứu hộ chạy không xác thực chứng chỉ: phản hồi (dù là 200 mang server_time hay 401 clock_skew) không được đổi giờ.
+  Rig r;
+  r.plat.trusted = true;
+  r.plat.unix_ = 1800000000u;
+  r.client->setAllowClockAdopt(false);
+  const char body[] = "{}";
+  r.http.script.push_back({200, okBody(1, 1900000000ULL)});
+  r.client->call("POST", "/v1/readings", reinterpret_cast<const uint8_t*>(body), 2);
+  TEST_ASSERT_EQUAL_UINT32(1800000000u, r.plat.unix_);
+  r.http.script.push_back({401, "{\"error\":\"clock_skew\",\"server_time\":1700000000}"});
+  const ServerReply rep = r.client->call("POST", "/v1/readings", reinterpret_cast<const uint8_t*>(body), 2);
+  TEST_ASSERT_EQUAL(ReplyKind::ClockSkew, rep.kind);
+  TEST_ASSERT_EQUAL_UINT32(1800000000u, r.plat.unix_);
+  TEST_ASSERT_EQUAL_INT(0, r.plat.setUnixCalls);
+  // Kênh bình thường (mặc định) vẫn được chỉnh giờ
+  r.client->setAllowClockAdopt(true);
+  r.http.script.push_back({401, "{\"error\":\"clock_skew\",\"server_time\":1800000500}"});
+  r.http.script.push_back({200, okBody(1, 1800000500ULL)});
+  r.client->call("POST", "/v1/readings", reinterpret_cast<const uint8_t*>(body), 2);
+  TEST_ASSERT_EQUAL_UINT32(1800000500u, r.plat.unix_);
+}
+
 void run_scenario_tests() {
   RUN_TEST(test_readings_before_time_are_backdated_when_clock_arrives);
   RUN_TEST(test_clock_step_mid_run_keeps_order_and_spacing);
@@ -397,6 +446,8 @@ void run_scenario_tests() {
   RUN_TEST(test_no_bulk_send_of_future_or_over_24h);
   RUN_TEST(test_flush_time_budget_limits_blocking);
   RUN_TEST(test_flush_is_bounded_per_call_and_eventually_drains);
+  RUN_TEST(test_deadline_helper_across_millis_rollover);
+  RUN_TEST(test_button_gesture_across_millis_rollover);
   RUN_TEST(test_upload_policy_start_delay_and_wraparound);
   RUN_TEST(test_start_delay_gates_immediate_breach_too);
   RUN_TEST(test_thundering_herd_devices_get_different_delays_even_with_identical_hw_rng);
@@ -408,4 +459,5 @@ void run_scenario_tests() {
   RUN_TEST(test_401_forever_hourly_request_count);
   RUN_TEST(test_429_reply_is_rate_limited_kind);
   RUN_TEST(test_client_builder_called_per_attempt_and_stops_on_empty_body);
+  RUN_TEST(test_untrusted_channel_must_not_set_the_clock);
 }

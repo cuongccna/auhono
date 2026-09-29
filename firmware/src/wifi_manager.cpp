@@ -2,6 +2,7 @@
 
 #include <WiFi.h>
 
+#include "auhono/time_policy.h"
 #include "config.h"
 
 namespace {
@@ -16,8 +17,6 @@ void onStaDisconnected(arduino_event_id_t, arduino_event_info_t info) {
   s_lastReason = info.wifi_sta_disconnected.reason;
   s_eventSeq = s_eventSeq + 1;
 }
-
-bool reached(uint32_t now, uint32_t deadline) { return static_cast<int32_t>(now - deadline) >= 0; }
 
 void applyTxPower() {
   // Phải gọi SAU khi driver Wi-Fi đã chạy (sau WiFi.begin). Có thể giảm công suất bằng -DAUHONO_WIFI_TX_POWER=WIFI_POWER_11dBm
@@ -96,7 +95,7 @@ void WifiManager::loop(uint32_t nowMs) {
     Serial.println("[wifi] mat ket noi");
   }
   if (holdOff_) return;
-  if (reached(nowMs, nextAttemptAt_)) attempt(nowMs);
+  if (auhono::reached(nowMs, nextAttemptAt_)) attempt(nowMs);
 }
 
 void WifiManager::attempt(uint32_t nowMs) {

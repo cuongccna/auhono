@@ -27,6 +27,7 @@ WANTED = [
     "GTS Root R1", "GTS Root R4",                  # Google Trust Services (Cloudflare dùng)
     "GlobalSign Root CA", "GlobalSign Root R46",   # GlobalSign (bản chéo ký cho GTS)
     "DigiCert Global Root G2",
+    "DigiCert Global Root CA",                     # G1: chuỗi của nhiều máy chủ tải file (vd. GitHub Releases: objects.githubusercontent.com); hết hạn 2031
     "USERTrust RSA Certification Authority", "USERTrust ECC Certification Authority",  # Sectigo
     "SSL.com TLS ECC Root CA 2022", "SSL.com TLS RSA Root CA 2022",  # SSL.com (Cloudflare dùng)
     "Amazon Root CA 1",                            # S3 / CloudFront (kho firmware)

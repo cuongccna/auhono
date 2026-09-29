@@ -55,6 +55,7 @@ Chưa cấu hình ZNS thì cảnh báo chỉ được ghi log (`LogNotifier`), h
 | Nhiệt độ về bình thường thoáng qua | Chỉ báo "đã ổn" khi bình thường liên tục 5 phút |
 | Mất điện / mất Wi-Fi / đứt dây đầu dò | Im lặng > 15 phút thì báo "mất kết nối"; nhắc lại +2 giờ, +6 giờ, +12 giờ; có số đo lại thì báo "đã kết nối lại" |
 | Thiết bị mới lắp nhưng chưa từng kết nối (Wi-Fi 5 GHz, sai mật khẩu) | Sau 60 phút kể từ lúc gắn chủ thì báo |
+| Trang chi tiết thiết bị | `GET /v1/devices/:id` trả trạng thái kèm `alarm_since`, `last_notified_at`, `armed`, `paused_until`, `acked_until` |
 | Chưa có người nhận cảnh báo | `GET /v1/devices` trả `recipient_count: 0` để app cảnh báo chủ quán |
 | ZNS lỗi tạm thời | Hàng đợi thử lại tối đa 8 lần, giãn cách 5/10/15... phút (chịu được ZNS lỗi vài giờ); thất bại hẳn hiện ở `notify_failures_24h` |
 | Cron và request thiết bị chạy cùng lúc | Khóa lạc quan theo `version` + nhận việc nguyên tử: không báo trùng, không "mất kết nối" oan |

@@ -35,6 +35,9 @@ const MAX_CLAIM_FAILURES_PER_HOUR = 10;
 
 const deviceIdRe = /^[A-Z0-9-]{3,32}$/;
 
+/** Tên hiển thị: chuẩn hóa NFC (iOS/Android có thể gửi dạng tổ hợp), cắt khoảng trắng, 1–60 ký tự. */
+const nameSchema = z.string().transform((v) => v.normalize('NFC').trim()).pipe(z.string().min(1).max(60));
+
 /** Đọc body có giới hạn kích thước theo luồng: body khổng lồ bị ngắt sớm, không nạp hết vào bộ nhớ. */
 async function readBodyCapped(req: Request, max: number): Promise<Uint8Array | null> {
   const reader = req.body?.getReader();
@@ -218,7 +221,7 @@ export function createApp(deps: Deps) {
   const claimSchema = z.object({
     device_id: z.string().regex(deviceIdRe),
     code: z.string().min(4).max(32),
-    name: z.string().trim().min(1).max(60).optional(),
+    name: nameSchema.optional(),
     kind: z.enum(['freezer', 'chiller']).optional(),
   });
 
@@ -235,7 +238,16 @@ export function createApp(deps: Deps) {
       .prepare('SELECT COUNT(*) AS n FROM claim_failures WHERE account_id = ? AND ts > ?')
       .bind(accountId, now - 3600)
       .first<{ n: number }>();
-    if ((fails?.n ?? 0) >= MAX_CLAIM_FAILURES_PER_HOUR) return c.json({ error: 'too_many_attempts' }, 429);
+    if ((fails?.n ?? 0) >= MAX_CLAIM_FAILURES_PER_HOUR) {
+      // Còn bao lâu tới khi lần sai cũ nhất trong cửa sổ 1 giờ hết hạn (để app hiện giờ cụ thể).
+      const oldest = await c.env.DB
+        .prepare('SELECT MIN(ts) AS ts FROM claim_failures WHERE account_id = ? AND ts > ?')
+        .bind(accountId, now - 3600)
+        .first<{ ts: number | null }>();
+      const retryAfter = Math.max(1, (oldest?.ts ?? now) + 3600 - now);
+      c.header('Retry-After', String(retryAfter));
+      return c.json({ error: 'too_many_attempts', retry_after: retryAfter }, 429);
+    }
 
     const expected = await deriveActivationCode(c.env.MASTER_SECRET, device_id);
     const codeOk = await timingSafeEqualStr(code.toUpperCase().replace(/[^0-9A-Z]/g, ''), expected);
@@ -257,13 +269,16 @@ export function createApp(deps: Deps) {
         resetStateStmt(c.env.DB, device_id),
       ]);
     }
-    return c.json({ ok: true, device_id });
+    // already_owned: gọi lại khi đã là chủ (mất phản hồi/bấm đúp): name/kind trong request bị bỏ qua.
+    return c.json({ ok: true, device_id, already_owned: mine });
   });
 
   type ListRow = DeviceRow & {
     phase: string | null;
     armed: number | null;
     acked_until: number | null;
+    breach_since: number | null;
+    last_notified_at: number | null;
     latest_ts: number | null;
     latest_c: number | null;
     recipient_count: number;
@@ -286,6 +301,9 @@ export function createApp(deps: Deps) {
     // Đang tạm dừng cảnh báo tới mốc này (null = không). Chủ quán "đã biết" một sự cố: không nhắc lại tới mốc này.
     paused_until: d.paused_until,
     acked_until: d.acked_until,
+    // Báo động nhiệt độ bắt đầu từ lúc nào (số đo đầu tiên của chuỗi vượt ngưỡng) và lần gửi tin gần nhất.
+    alarm_since: d.phase === 'temp_alarm' ? d.breach_since : null,
+    last_notified_at: d.last_notified_at,
     // 0 = sẽ không có tin nhắn nào được gửi: app phải cảnh báo chủ quán.
     recipient_count: d.recipient_count,
     // > 0 = có tin không gửi được trong 24 giờ qua (sai số, chưa theo dõi OA...).
@@ -293,31 +311,44 @@ export function createApp(deps: Deps) {
     latest: d.latest_ts === null ? null : { ts: d.latest_ts, temp_c: d.latest_c! },
   });
 
-  app.get('/v1/devices', ownerAuth, async (c) => {
+  /** Danh sách thiết bị của chủ quán (hoặc một thiết bị nếu có deviceId) kèm trạng thái. */
+  async function listDevices(c: Ctx, deviceId: string | null) {
     const now = deps.now();
     const { results } = await c.env.DB
       .prepare(
         `SELECT d.*, s.phase AS phase, s.armed AS armed, s.acked_until AS acked_until,
+           s.breach_since AS breach_since, s.last_notified_at AS last_notified_at,
            (SELECT ts FROM readings r WHERE r.device_id = d.id ORDER BY ts DESC LIMIT 1) AS latest_ts,
            (SELECT temp_c FROM readings r WHERE r.device_id = d.id ORDER BY ts DESC LIMIT 1) AS latest_c,
            (SELECT COUNT(*) FROM recipients rc WHERE rc.device_id = d.id) AS recipient_count,
            (SELECT COUNT(*) FROM alert_events ev JOIN notifications n ON n.event_id = ev.id
              WHERE ev.device_id = d.id AND n.status = 'failed' AND n.updated_at >= ?2) AS notify_failures_24h
          FROM devices d LEFT JOIN alert_state s ON s.device_id = d.id
-         WHERE d.account_id = ?1 AND d.revoked = 0 ORDER BY d.created_at`,
+         WHERE d.account_id = ?1 AND d.revoked = 0 AND (?3 IS NULL OR d.id = ?3) ORDER BY d.created_at`,
       )
-      .bind(c.get('accountId'), now - 24 * 3600)
+      .bind(c.get('accountId'), now - 24 * 3600, deviceId)
       .all<ListRow>();
-    return c.json({
-      // Giờ server để app tính "mất kết nối"/"x phút trước" không phụ thuộc đồng hồ điện thoại.
-      server_time: now,
-      devices: results.map(publicDevice),
-    });
+    return { now, devices: results.map(publicDevice) };
+  }
+
+  app.get('/v1/devices', ownerAuth, async (c) => {
+    const { now, devices } = await listDevices(c, null);
+    // Giờ server để app tính "mất kết nối"/"x phút trước" không phụ thuộc đồng hồ điện thoại.
+    return c.json({ server_time: now, devices });
+  });
+
+  // Một thiết bị (trang chi tiết không phải tải cả danh sách).
+  app.get('/v1/devices/:id', ownerAuth, async (c) => {
+    const id = c.req.param('id') ?? '';
+    if (!deviceIdRe.test(id)) return c.json({ error: 'not_found' }, 404);
+    const { now, devices } = await listDevices(c, id);
+    if (devices.length === 0) return c.json({ error: 'not_found' }, 404);
+    return c.json({ server_time: now, device: devices[0] });
   });
 
   const patchSchema = z
     .object({
-      name: z.string().trim().min(1).max(60),
+      name: nameSchema,
       kind: z.enum(['freezer', 'chiller']),
       min_c: z.number().min(-60).max(30),
       max_c: z.number().min(-60).max(30),
@@ -455,7 +486,7 @@ export function createApp(deps: Deps) {
     const device = await ownedDevice(c);
     if (!device) return c.json({ error: 'not_found' }, 404);
     const parsed = z
-      .object({ name: z.string().trim().min(1).max(60), phone: z.string().max(20) })
+      .object({ name: nameSchema, phone: z.string().max(20) })
       .safeParse(await c.req.json().catch(() => null));
     const phone = parsed.success ? normalizePhone(parsed.data.phone) : null;
     if (!parsed.success || !phone) return c.json({ error: 'bad_request' }, 400);

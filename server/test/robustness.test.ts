@@ -203,7 +203,7 @@ describe('chặn dò mã kích hoạt', () => {
     for (let i = 0; i < 10; i++) expect((await wrong()).status).toBe(404);
     const blocked = await h.owner('owner-b-token', 'POST', '/v1/devices/claim', { device_id: id, code: await activationCode(id) });
     expect(blocked.status).toBe(429);
-    expect(await json(blocked)).toEqual({ error: 'too_many_attempts' });
+    expect(await json(blocked)).toMatchObject({ error: 'too_many_attempts', retry_after: 3600 });
 
     const other = await h.owner('owner-a-token', 'POST', '/v1/devices/claim', { device_id: id, code: await activationCode(id) });
     expect(other.status).toBe(200);

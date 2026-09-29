@@ -193,3 +193,60 @@ describe('CORS', () => {
     expect(bad.headers.get('Access-Control-Allow-Origin')).toBeNull();
   });
 });
+
+describe('chi tiết thiết bị và các trường bổ sung', () => {
+  it('GET /v1/devices/:id trả đúng một thiết bị của mình; của người khác/không tồn tại => 404', async () => {
+    const id = await createActiveDevice(h);
+    const res = await json(await h.owner('owner-a-token', 'GET', `/v1/devices/${id}`));
+    expect(res.server_time).toBe(NOW);
+    expect(res.device).toMatchObject({ id, recipient_count: 1, alarm_since: null, last_notified_at: null });
+    expect((await h.owner('owner-b-token', 'GET', `/v1/devices/${id}`)).status).toBe(404);
+    expect((await h.owner('owner-a-token', 'GET', '/v1/devices/AUH-424242')).status).toBe(404);
+    expect((await h.owner('owner-a-token', 'GET', '/v1/devices/khong%20hop%20le')).status).toBe(404);
+  });
+
+  it('alarm_since và last_notified_at có giá trị khi đang báo động nhiệt độ', async () => {
+    const id = await createActiveDevice(h);
+    await testEnv.DB.prepare('UPDATE alert_state SET armed = 1 WHERE device_id = ?').bind(id).run();
+    for (let m = 0; m < 25; m += 5) {
+      h.clock.now = NOW + m * 60 + 240;
+      await h.signed(id, 'POST', '/v1/readings', m / 5 + 1, readingsBody(h.clock.now, Array(5).fill(-9)));
+    }
+    await h.settle();
+    const d = (await json(await h.owner('owner-a-token', 'GET', `/v1/devices/${id}`))).device;
+    expect(d.phase).toBe('temp_alarm');
+    expect(d.alarm_since).toBe(NOW); // số đo đầu tiên của chuỗi vượt ngưỡng
+    expect(d.last_notified_at).toBeGreaterThan(NOW);
+  });
+
+  it('429 kèm Retry-After cụ thể (giây)', async () => {
+    const id = await createDevice();
+    for (let i = 0; i < 10; i++) await h.owner('owner-b-token', 'POST', '/v1/devices/claim', { device_id: id, code: 'AAAAAAAAAA' });
+    h.clock.now += 600; // đã qua 10 phút
+    const res = await h.owner('owner-b-token', 'POST', '/v1/devices/claim', { device_id: id, code: 'AAAAAAAAAA' });
+    expect(res.status).toBe(429);
+    const body = await json(res);
+    expect(body.retry_after).toBe(3000);
+    expect(res.headers.get('Retry-After')).toBe('3000');
+  });
+
+  it('claim gọi lại bởi chính chủ trả already_owned, bỏ qua name/kind mới', async () => {
+    const id = await createDevice();
+    const body = { device_id: id, code: await activationCode(id), name: 'Tủ A', kind: 'freezer' as const };
+    expect(await json(await h.owner('owner-a-token', 'POST', '/v1/devices/claim', body))).toMatchObject({ already_owned: false });
+    expect(await json(await h.owner('owner-a-token', 'POST', '/v1/devices/claim', { ...body, name: 'Tên khác', kind: 'chiller' }))).toMatchObject({ already_owned: true });
+    const d = (await json(await h.owner('owner-a-token', 'GET', `/v1/devices/${id}`))).device;
+    expect(d).toMatchObject({ name: 'Tủ A', kind: 'freezer' });
+  });
+
+  it('tên chuẩn hóa NFC trước khi lưu/đếm độ dài (iOS gửi dạng tổ hợp)', async () => {
+    const id = await createActiveDevice(h);
+    const decomposed = 'Tụ̂ kém'.normalize('NFD'); // ký tự có dấu ở dạng tổ hợp
+    expect((await h.owner('owner-a-token', 'PATCH', `/v1/devices/${id}`, { name: `  ${decomposed}  ` })).status).toBe(200);
+    const d = (await json(await h.owner('owner-a-token', 'GET', `/v1/devices/${id}`))).device;
+    expect(d.name).toBe(decomposed.normalize('NFC'));
+    // 60 chữ "ậ" tổ hợp (mỗi chữ 3 code point NFD) vẫn hợp lệ sau NFC: 60 ký tự.
+    expect((await h.owner('owner-a-token', 'PATCH', `/v1/devices/${id}`, { name: 'ậ'.normalize('NFD').repeat(60) })).status).toBe(200);
+    expect((await h.owner('owner-a-token', 'PATCH', `/v1/devices/${id}`, { name: 'a'.repeat(61) })).status).toBe(400);
+  });
+});

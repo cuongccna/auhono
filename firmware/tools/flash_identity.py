@@ -2,7 +2,10 @@
 """Nạp danh tính (mã thiết bị + khóa 32 byte) vào phân vùng NVS "ident" của một chip.
 
 Đầu vào là một dòng của devices.csv do `server/scripts/provision.ts` sinh ra:
-    device_id,device_key_hex,activation_code,qr_payload
+    device_id,device_key_hex,activation_code,qr_payload[,ap_ssid,ap_password,wifi_qr_payload]
+Các cột ap_* / wifi_qr_payload (Wi-Fi cấu hình có mật khẩu WPA2) là TÙY CHỌN và không cần nạp gì thêm: thiết bị tự suy ra
+mật khẩu từ khóa (docs/PROTOCOL.md). Nếu có mặt, script đối chiếu với giá trị suy ra từ khóa và TỪ CHỐI nạp nếu lệch
+(dòng CSV sai: nạp vào sẽ cho ra máy có nhãn/QR không khớp mật khẩu thật). Cột lạ khác được bỏ qua.
 
 Cách làm: dựng ảnh NVS bằng `esp_idf_nvs_partition_gen` (công cụ chính thức của ESP-IDF, cài qua pip),
 rồi ghi ảnh vào đúng địa chỉ phân vùng "ident" (đọc từ partitions.csv) bằng esptool. Phân vùng này
@@ -18,6 +21,8 @@ Khóa là BÍ MẬT: script không in khóa ra màn hình, tệp tạm được 
 """
 import argparse
 import csv
+import hashlib
+import hmac
 import os
 import re
 import shutil
@@ -28,6 +33,39 @@ import tempfile
 DEVICE_ID_RE = re.compile(r"^[A-Z0-9-]{3,32}$")  # khớp server/src/app.ts và auhono::isValidDeviceId
 KEY_HEX_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 NAMESPACE = "id"  # khớp storage.cpp (loadIdentity)
+
+
+AP_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"  # khớp auhono::kApPasswordAlphabet (ap_credentials.h)
+AP_PASSWORD_LEN = 10
+AP_PASSWORD_CONTEXT = b"ap-password:v1"
+
+
+def derive_ap_password(key_hex: str) -> str:
+    """Mật khẩu WPA2 của Wi-Fi cấu hình: 10 ký tự ALPHABET[byte % 32] của HMAC-SHA256(device_key, "ap-password:v1")."""
+    mac = hmac.new(bytes.fromhex(key_hex), AP_PASSWORD_CONTEXT, hashlib.sha256).digest()
+    return "".join(AP_ALPHABET[b % 32] for b in mac[:AP_PASSWORD_LEN])
+
+
+def derive_ap_ssid(device_id: str) -> str:
+    """"Auhono-" + 4 ký tự cuối của mã (như slice(-4) của máy chủ; mã ngắn hơn 4 ký tự dùng cả mã; mã rỗng -> 0000)."""
+    return "Auhono-" + (device_id[-4:] if device_id else "0000")
+
+
+def derive_wifi_qr(device_id: str, key_hex: str) -> str:
+    return f"WIFI:T:WPA;S:{derive_ap_ssid(device_id)};P:{derive_ap_password(key_hex)};H:false;;"
+
+
+def check_ap_columns(row: dict, device_id: str, key_hex: str) -> None:
+    """Đối chiếu các cột Wi-Fi cấu hình (nếu có) với giá trị suy ra từ khóa; lệch là từ chối. Không in mật khẩu."""
+    checks = (
+        ("ap_ssid", derive_ap_ssid(device_id)),
+        ("ap_password", derive_ap_password(key_hex)),
+        ("wifi_qr_payload", derive_wifi_qr(device_id, key_hex)),
+    )
+    for col, expected in checks:
+        given = (row.get(col) or "").strip()
+        if given and not hmac.compare_digest(given.encode(), expected.encode()):
+            die(f"cột {col} của {device_id} KHÔNG khớp giá trị suy ra từ device_key_hex: dòng CSV sai hoặc lẫn khóa. Từ chối nạp.")
 
 
 def die(msg: str) -> None:
@@ -44,6 +82,7 @@ def read_row(csv_path: str, device_id: str) -> tuple[str, str]:
                     die(f"device_id không hợp lệ: {device_id!r}")
                 if not KEY_HEX_RE.match(key):
                     die("device_key_hex phải là 64 ký tự hex (32 byte)")
+                check_ap_columns(row, device_id, key.lower())
                 return device_id, key.lower()
     die(f"không tìm thấy {device_id} trong {csv_path}")
     raise AssertionError  # không tới đây

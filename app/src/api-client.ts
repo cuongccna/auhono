@@ -10,6 +10,7 @@ import { AppError, mapHttpError } from './lib/errors.ts';
 import {
   parseDeviceList,
   parseOk,
+  parseOkUntil,
   parseReadings,
   parseRecipient,
   parseRecipientList,
@@ -218,6 +219,19 @@ export function createApiClient(opts: ApiOptions) {
 
     removeDevice: async (id: string): Promise<void> => {
       parseOk((await request('DELETE', dev(id))).json);
+    },
+
+    /** "Đã biết, đang xử lý": dừng tin nhắc lại `hours` giờ (1..24). Trả mốc `acked_until` (Unix giây). 409 no_active_alert nếu không có sự cố. Gọi lại an toàn. */
+    ackDevice: async (id: string, hours = 4): Promise<number> =>
+      parseOkUntil((await request('POST', `${dev(id)}/ack`, { hours: Math.min(24, Math.max(1, Math.trunc(hours) || 4)) })).json, 'acked_until'),
+
+    /** Tạm dừng cảnh báo `days` ngày (1..60). Trả mốc `paused_until`. Gọi lại an toàn (chỉ dời mốc). */
+    pauseDevice: async (id: string, days: number): Promise<number> =>
+      parseOkUntil((await request('POST', `${dev(id)}/pause`, { days: Math.min(60, Math.max(1, Math.trunc(days) || 1)) })).json, 'paused_until'),
+
+    /** Bật lại cảnh báo sớm. Gọi lại an toàn. */
+    resumeDevice: async (id: string): Promise<void> => {
+      parseOk((await request('DELETE', `${dev(id)}/pause`)).json);
     },
 
     getReadings: async (id: string, hours = 24, call?: CallOptions): Promise<Readings> => {

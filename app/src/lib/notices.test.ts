@@ -19,6 +19,10 @@ describe('deviceNotices (hợp đồng server mới)', () => {
   it('chưa có số đo nào thì khỏi nói "chưa bật báo động" (đã có hướng dẫn cài đặt)', () => {
     expect(deviceNotices({ armed: false }, 'no_data')).toEqual([]);
   });
+  it('đang tạm dừng: không nói "chờ tủ đạt nhiệt độ" nhưng vẫn nhắc thiếu người nhận', () => {
+    expect(deviceNotices({ armed: false }, 'paused')).toEqual([]);
+    expect(deviceNotices({ armed: false, recipient_count: 0 }, 'paused')).toEqual(['no_recipients']);
+  });
   it('server cũ (các trường vắng mặt) => không hiện gì, không đoán', () => {
     expect(deviceNotices({})).toEqual([]);
   });

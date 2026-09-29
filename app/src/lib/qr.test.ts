@@ -174,9 +174,9 @@ describe('nhập tay / dán: chữ toàn chiều rộng, ký tự vô hình, dá
     expect(normalizeDeviceId('ＡＵＨ－０００００１')).toBe('AUH-000001');
   });
   it('ký tự vô hình khi dán từ tin nhắn Zalo (zero-width, BOM, NBSP)', () => {
-    expect(normalizeActivationCode('ABCDE​FGHJK')).toBe('ABCDEFGHJK');
-    expect(normalizeActivationCode('﻿ABCDE FGHJK')).toBe('ABCDEFGHJK');
-    expect(normalizeDeviceId('AUH​-000001')).toBe('AUH-000001');
+    expect(normalizeActivationCode('ABCDE\u200BFGHJK')).toBe('ABCDEFGHJK');
+    expect(normalizeActivationCode('\uFEFFABCDE\u00A0FGHJK')).toBe('ABCDEFGHJK');
+    expect(normalizeDeviceId('AUH\u200B-000001')).toBe('AUH-000001');
   });
   it('dán nguyên đường dẫn QR vào ô mã thiết bị hoặc ô mã kích hoạt', () => {
     const url = 'auhono://claim?d=AUH-000009&c=ABCDEFGHJK';

@@ -114,7 +114,7 @@ describe('validateRecipientInput: tên', () => {
     expect(r.ok).toBe(false);
   });
   it('tên rỗng / chỉ ký tự vô hình bị từ chối, số sai báo đúng ô', () => {
-    const r = validateRecipientInput('​ ', 'abc');
+    const r = validateRecipientInput('\u200B ', 'abc');
     expect(r.ok).toBe(false);
     if (!r.ok) {
       expect(r.nameError).toBeTruthy();

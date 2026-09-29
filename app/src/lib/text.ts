@@ -4,7 +4,7 @@
 
 /** Ký tự điều khiển, ký tự vô hình (zero-width) và ký tự đổi chiều chữ (bidi) — thường do dán từ tin nhắn/web. */
 // Giữ ZWJ/ZWNJ (U+200C/U+200D) nằm GIỮA hai ký tự vì emoji ghép và một số chữ cần chúng; chỉ bỏ khi đứng đầu/cuối/cạnh dấu cách (xem cleanText).
-const INVISIBLE_RE = /[\u0000-\u001F\u007F-\u009F­​‎‏‪-‮⁠-⁤⁦-⁩﻿]/g;
+const INVISIBLE_RE = /[\u0000-\u001F\u007F-\u009F\u00AD\u200B\u200E\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF]/g;
 
 /** Server giới hạn tên tối đa 60 ký tự, đếm theo đơn vị UTF-16 của JavaScript (biểu tượng cảm xúc = 2). */
 export const NAME_MAX = 60;

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { AppError } from './errors.ts';
-import { MAX_POINTS, parseDevice, parseDeviceList, parseOk, parseReadings, parseRecipient, parseRecipientList, parseServerTime } from './schemas.ts';
+import { MAX_POINTS, parseOkUntil, parseDevice, parseDeviceList, parseOk, parseReadings, parseRecipient, parseRecipientList, parseServerTime } from './schemas.ts';
 
 const device = {
   id: 'AUH-000001',
@@ -137,5 +137,34 @@ describe('chịu lỗi từng dòng, danh sách lớn', () => {
   it('tên thiết bị rất dài / có ký tự lạ vẫn là chuỗi thường (chỉ hiển thị dạng văn bản)', () => {
     const d = parseDevice({ ...device, name: '<img src=x onerror=alert(1)>'.repeat(50) });
     expect(typeof d.name).toBe('string');
+  });
+});
+
+describe('trường mới: paused_until / acked_until / claimed_at', () => {
+  it('đọc số và null', () => {
+    const d = parseDevice({ ...device, paused_until: 1_800_100_000, acked_until: null, claimed_at: 1_799_000_000 });
+    expect(d).toMatchObject({ paused_until: 1_800_100_000, acked_until: null, claimed_at: 1_799_000_000 });
+  });
+  it('server cũ: vắng mặt (KHÔNG mặc định thành null, để biết server có hỗ trợ hay không)', () => {
+    const d = parseDevice(device);
+    expect('paused_until' in d).toBe(false);
+    expect('acked_until' in d).toBe(false);
+    expect('claimed_at' in d).toBe(false);
+  });
+  it('sai kiểu (chuỗi, âm, NaN) bị bỏ qua, không làm hỏng thiết bị', () => {
+    const d = parseDevice({ ...device, paused_until: '2027', acked_until: -5, claimed_at: NaN });
+    expect(d.id).toBe('AUH-000001');
+    expect('paused_until' in d).toBe(false);
+    expect('acked_until' in d).toBe(false);
+    expect('claimed_at' in d).toBe(false);
+  });
+  it('parseOkUntil: cần ok=true và mốc thời gian hợp lệ', () => {
+    expect(parseOkUntil({ ok: true, acked_until: 1_800_000_000 }, 'acked_until')).toBe(1_800_000_000);
+    expect(parseOkUntil({ ok: true, paused_until: 1_800_000_000 }, 'paused_until')).toBe(1_800_000_000);
+    bad(() => parseOkUntil({ ok: true }, 'acked_until'));
+    bad(() => parseOkUntil({ ok: true, acked_until: 'x' }, 'acked_until'));
+    bad(() => parseOkUntil({ ok: false, acked_until: 1_800_000_000 }, 'acked_until'));
+    bad(() => parseOkUntil({ ok: true, paused_until: 1_800_000_000 }, 'acked_until'));
+    bad(() => parseOkUntil(null, 'acked_until'));
   });
 });

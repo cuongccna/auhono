@@ -1,4 +1,5 @@
 // Các khối hướng dẫn ngắn bằng chữ đơn giản cho chủ quán không rành kỹ thuật.
+import { formatVnDateTime } from '../lib/format.ts';
 import { NOTICE_DETAIL, NOTICE_TEXT, type DeviceNoticeKind } from '../lib/notices.ts';
 
 /** Vì sao cảnh báo không kêu ngay + "mất kết nối" nghĩa là gì. Đặt ở chi tiết thiết bị. */
@@ -16,7 +17,9 @@ export function AlertHelp({ breachMinutes }: { breachMinutes?: number }) {
           hoặc dây đầu dò nhiệt độ bị đứt/rút. Bạn nên đi kiểm tra tủ.
         </li>
         <li>
-          <strong>Nhắc lại:</strong> nếu sự cố kéo dài, hệ thống sẽ nhắc lại định kỳ, và báo "đã ổn" khi tủ về bình thường.
+          <strong>Nhắc lại:</strong> nếu sự cố kéo dài, hệ thống nhắc lại thưa dần (nhiệt độ: sau 30 phút, rồi cách 2, 4, 8, 12 giờ; mất kết nối: sau 2 giờ,
+          rồi cách 6, 12 giờ) và báo "đã ổn" khi tủ về bình thường. Chỉ người nhận chính (người đầu tiên trong danh sách) nhận tin nhắc lại. Bấm{' '}
+          <strong>"Đã biết, đang xử lý"</strong> để ngừng nhắc trong vài giờ.
         </li>
         <li>
           <strong>Tủ mới hoặc vừa đổi ngưỡng:</strong> báo động chỉ bật sau khi tủ đã xuống tới khoảng ngưỡng ít nhất một lần.
@@ -30,11 +33,17 @@ export function AlertHelp({ breachMinutes }: { breachMinutes?: number }) {
 }
 
 /** Thiết bị mới kích hoạt, chưa có số đo: hướng dẫn cắm điện + nối Wi-Fi + mở lại trang cấu hình. */
-export function SetupHelp({ deviceId }: { deviceId: string }) {
+export function SetupHelp({ deviceId, neverSeenAlert, claimedAt }: { deviceId: string; neverSeenAlert?: boolean; claimedAt?: number | null }) {
   const tail = deviceId.slice(-4);
   return (
     <div className="auh-banner auh-banner-info" style={{ marginTop: 12, marginBottom: 0 }}>
       <strong>Chưa có dữ liệu — cắm điện và kết nối Wi-Fi cho thiết bị.</strong>
+      {neverSeenAlert && (
+        <div style={{ marginTop: 4 }}>
+          Đã lâu kể từ lúc kích hoạt{claimedAt ? ` (${formatVnDateTime(claimedAt)})` : ''} mà thiết bị vẫn chưa gửi số đo nào, nên hệ thống đã báo cho bạn.
+          Rất có thể Wi-Fi chưa được cài, hoặc nhập sai mật khẩu, hoặc nhà dùng Wi-Fi 5 GHz.
+        </div>
+      )}
       <ol className="auh-list">
         <li>Cắm điện cho thiết bị và đặt đầu dò vào trong tủ.</li>
         <li>

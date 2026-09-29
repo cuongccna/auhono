@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 // Kịch bản thực tế ở mức màn hình (jsdom, zmp-sdk và fetch giả lập). KHÔNG phải chạy trong Zalo thật.
-import { cleanup, fireEvent, render, screen, waitFor, within, act } from '@testing-library/react';
+import { act, cleanup, configure, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const sdk = vi.hoisted(() => ({
@@ -25,6 +25,8 @@ import { ErrorBoundary } from './components/error-boundary.tsx';
 import { resetClock } from './lib/clock.ts';
 
 Element.prototype.scrollTo = () => undefined;
+// GET lỗi mạng tự thử lại sau 0,8 giây (api-client): nới hạn chờ để test không phụ thuộc tốc độ máy chạy.
+configure({ asyncUtilTimeout: 5000 });
 
 type Call = { url: string; method: string; body: any };
 type Json = Record<string, unknown>;
@@ -48,7 +50,7 @@ function makeDevice(over: Json = {}): Json {
   return {
     id: ID, name: 'Tủ kem', kind: 'freezer', min_c: -40, max_c: -18, breach_minutes: 15,
     last_seen: t - 60, firmware: '1.0.0', phase: 'ok', latest: { ts: t - 60, temp_c: -20.5 },
-    armed: true, recipient_count: 2, notify_failures_24h: 0,
+    armed: true, recipient_count: 2, notify_failures_24h: 0, paused_until: null, acked_until: null, claimed_at: t - 86400,
     ...over,
   };
 }
@@ -68,6 +70,20 @@ function defaultHandler(c: Call): Response {
   if (c.url.startsWith(`/v1/devices/${ID}/recipients/`) && c.method === 'DELETE') {
     const rid = Number(c.url.split('/').pop());
     recipients = recipients.filter((r) => r.id !== rid);
+    return jsonRes({ ok: true });
+  }
+  if (c.url === `/v1/devices/${ID}/ack` && c.method === 'POST') {
+    const until = serverNow() + (c.body?.hours ?? 4) * 3600;
+    devices = devices.map((d) => ({ ...d, acked_until: until }));
+    return jsonRes({ ok: true, acked_until: until });
+  }
+  if (c.url === `/v1/devices/${ID}/pause` && c.method === 'POST') {
+    const until = serverNow() + c.body.days * 86400;
+    devices = devices.map((d) => ({ ...d, paused_until: until, phase: 'ok' }));
+    return jsonRes({ ok: true, paused_until: until });
+  }
+  if (c.url === `/v1/devices/${ID}/pause` && c.method === 'DELETE') {
+    devices = devices.map((d) => ({ ...d, paused_until: null }));
     return jsonRes({ ok: true });
   }
   if (c.url === `/v1/devices/${ID}` && (c.method === 'PATCH' || c.method === 'DELETE')) return jsonRes({ ok: true });
@@ -787,5 +803,218 @@ describe('tự làm mới trong màn hình (fake timers)', () => {
     expect(callsTo('GET', /readings/)).toHaveLength(1);
     await act(async () => { await vi.advanceTimersByTimeAsync(61_000); });
     expect(callsTo('GET', /readings/)).toHaveLength(2);
+  });
+});
+
+// ───────────────────────────── Đã biết (ack) / Tạm dừng / Người nhận chính ─────────────────────────────
+
+const alarm = (over: Json = {}) => {
+  const t0 = serverNow();
+  return makeDevice({ phase: 'temp_alarm', latest: { ts: t0 - 60, temp_c: -12 }, last_seen: t0 - 60, ...over });
+};
+const ACK = 'Đã biết, đang xử lý';
+
+describe('"Đã biết, đang xử lý" (ack)', () => {
+  it('hiện khi phase khác ok và chưa ack; KHÔNG hiện khi phase = ok', async () => {
+    devices = [alarm()];
+    open(`/device/${ID}`);
+    expect(await screen.findByRole('button', { name: ACK })).toBeTruthy();
+    cleanup();
+    devices = [makeDevice({ phase: 'ok' })];
+    open(`/device/${ID}`);
+    await t('Bình thường');
+    expect(screen.queryByRole('button', { name: ACK })).toBeNull();
+  });
+
+  it('phase offline cũng hiện nút', async () => {
+    devices = [makeDevice({ phase: 'offline', last_seen: serverNow() - 3 * 3600, latest: { ts: serverNow() - 3 * 3600, temp_c: -19 } })];
+    open(`/device/${ID}`);
+    expect(await screen.findByRole('button', { name: ACK })).toBeTruthy();
+  });
+
+  it('acked_until còn hiệu lực => ẩn nút và hiện "Đã ghi nhận, sẽ nhắc lại sau HH:mm nếu chưa xong"; đã qua => hiện lại nút', async () => {
+    devices = [alarm({ acked_until: serverNow() + 3 * 3600 })];
+    open(`/device/${ID}`);
+    expect(await t(/Đã ghi nhận, sẽ nhắc lại sau \d\d:\d\d( \d\d\/\d\d)? nếu chưa xong\./)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: ACK })).toBeNull();
+    cleanup();
+    devices = [alarm({ acked_until: serverNow() - 10 })];
+    open(`/device/${ID}`);
+    expect(await screen.findByRole('button', { name: ACK })).toBeTruthy();
+    expect(screen.queryByText(/Đã ghi nhận/)).toBeNull();
+  });
+
+  it('bấm: POST /ack {hours: 4}, rồi hiện lời xác nhận và nút biến mất', async () => {
+    devices = [alarm()];
+    open(`/device/${ID}`);
+    fireEvent.click(await screen.findByRole('button', { name: ACK }));
+    await waitFor(() => expect(callsTo('POST', `/v1/devices/${ID}/ack`)).toHaveLength(1));
+    expect(callsTo('POST', `/v1/devices/${ID}/ack`)[0]!.body).toEqual({ hours: 4 });
+    expect((await screen.findAllByText(/Đã ghi nhận, sẽ nhắc lại sau/)).length).toBeGreaterThan(0);
+    await waitFor(() => expect(screen.queryByRole('button', { name: ACK })).toBeNull());
+  });
+
+  it('bấm đúp chỉ gửi MỘT request', async () => {
+    devices = [alarm()];
+    open(`/device/${ID}`);
+    const btn = await screen.findByRole('button', { name: ACK });
+    fireEvent.click(btn);
+    fireEvent.click(btn);
+    await waitFor(() => expect(callsTo('POST', `/v1/devices/${ID}/ack`)).toHaveLength(1));
+  });
+
+  it('409 no_active_alert (sự cố vừa hết): thông báo dễ hiểu và màn hình tự tải lại', async () => {
+    devices = [alarm()];
+    override = (c) => (c.url.endsWith('/ack') ? jsonRes({ error: 'no_active_alert' }, 409) : undefined);
+    open(`/device/${ID}`);
+    const before = callsTo('GET', '/v1/devices').length;
+    fireEvent.click(await screen.findByRole('button', { name: ACK }));
+    expect(await t(/không có sự cố nào cần ghi nhận/)).toBeTruthy();
+    await waitFor(() => expect(callsTo('GET', '/v1/devices').length).toBeGreaterThan(before));
+  });
+
+  it('server cũ (không có acked_until): không hiện nút, không gọi endpoint không tồn tại', async () => {
+    const d = alarm();
+    delete d.acked_until;
+    delete d.paused_until;
+    devices = [d];
+    open(`/device/${ID}`);
+    await t('Đang báo động');
+    expect(screen.queryByRole('button', { name: ACK })).toBeNull();
+    expect(screen.queryByText('Tạm dừng cảnh báo')).toBeNull(); // cả mục tạm dừng cũng ẩn
+  });
+});
+
+/** Chọn số ngày tạm dừng (chờ màn hình tải xong). */
+async function pickDays(n: number) {
+  const group = await screen.findByRole('group', { name: 'Số ngày tạm dừng' });
+  fireEvent.click(within(group).getAllByRole('button').find((b) => b.textContent?.startsWith(String(n)))!);
+}
+
+describe('tạm dừng cảnh báo', () => {
+  it('có các lựa chọn 1 / 3 / 7 / 14 / 30 ngày', async () => {
+    open(`/device/${ID}`);
+    const group = await screen.findByRole('group', { name: 'Số ngày tạm dừng' });
+    expect(within(group).getAllByRole('button').map((b) => b.textContent?.replace('ngày', ''))).toEqual(['1', '3', '7', '14', '30']);
+  });
+
+  it('phải qua hộp thoại cảnh báo "bạn sẽ KHÔNG nhận cảnh báo"; huỷ thì không gửi gì', async () => {
+    open(`/device/${ID}`);
+    await pickDays(7);
+    fireEvent.click(screen.getByRole('button', { name: 'Tạm dừng cảnh báo' }));
+    const dialog = await screen.findByRole('dialog');
+    expect(dialog.textContent).toContain('KHÔNG nhận cảnh báo');
+    expect(dialog.textContent).toContain('7 ngày');
+    expect(callsTo('POST', `/v1/devices/${ID}/pause`)).toHaveLength(0);
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Không' }));
+    await new Promise((r) => setTimeout(r, 30));
+    expect(callsTo('POST', `/v1/devices/${ID}/pause`)).toHaveLength(0);
+  });
+
+  it('xác nhận: POST /pause {days: 7}; hiện "Đang tạm dừng cảnh báo tới dd/MM", huy hiệu Tạm dừng và nút Bật lại', async () => {
+    open(`/device/${ID}`);
+    await pickDays(7);
+    fireEvent.click(screen.getByRole('button', { name: 'Tạm dừng cảnh báo' }));
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: /Tạm dừng 7 ngày/ }));
+    await waitFor(() => expect(callsTo('POST', `/v1/devices/${ID}/pause`)).toHaveLength(1));
+    expect(callsTo('POST', `/v1/devices/${ID}/pause`)[0]!.body).toEqual({ days: 7 });
+    expect(await t(/Đang tạm dừng cảnh báo tới \d\d\/\d\d/)).toBeTruthy();
+    expect(screen.getAllByText('Tạm dừng cảnh báo').length).toBeGreaterThan(0); // huy hiệu
+    expect(screen.getByRole('button', { name: 'Bật lại' })).toBeTruthy();
+  });
+
+  it('đang tạm dừng mà thiết bị im lặng (cố ý rút điện): KHÔNG hiện "Mất kết nối", không banner sự cố, không nút Đã biết', async () => {
+    const t0 = serverNow();
+    devices = [makeDevice({ phase: 'offline', last_seen: t0 - 5 * 3600, latest: { ts: t0 - 5 * 3600, temp_c: -19 }, paused_until: t0 + 3 * 86400 })];
+    open(`/device/${ID}`);
+    expect(await t(/Đang tạm dừng cảnh báo tới/)).toBeTruthy();
+    expect(screen.queryByText('Mất kết nối')).toBeNull();
+    expect(screen.queryByText(/Lần cuối nhận số đo lúc/)).toBeNull();
+    expect(screen.queryByRole('button', { name: ACK })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Tạm dừng cảnh báo' })).toBeNull(); // đang dừng rồi: chỉ có "Bật lại"
+  });
+
+  it('"Bật lại": DELETE /pause rồi quay về trạng thái bình thường', async () => {
+    devices = [makeDevice({ paused_until: serverNow() + 86400 })];
+    open(`/device/${ID}`);
+    fireEvent.click(await screen.findByRole('button', { name: 'Bật lại' }));
+    await waitFor(() => expect(callsTo('DELETE', `/v1/devices/${ID}/pause`)).toHaveLength(1));
+    await waitFor(() => expect(screen.queryByText(/Đang tạm dừng cảnh báo tới/)).toBeNull());
+    expect(await t('Bình thường')).toBeTruthy();
+  });
+
+  it('tạm dừng đã hết hạn (paused_until quá khứ): coi như không tạm dừng', async () => {
+    devices = [makeDevice({ paused_until: serverNow() - 60 })];
+    open(`/device/${ID}`);
+    expect(await t('Bình thường')).toBeTruthy();
+    expect(screen.queryByText(/Đang tạm dừng/)).toBeNull();
+  });
+
+  it('bấm xác nhận đúp chỉ gửi một POST /pause', async () => {
+    open(`/device/${ID}`);
+    fireEvent.click(await screen.findByRole('button', { name: 'Tạm dừng cảnh báo' }));
+    const dialog = await screen.findByRole('dialog');
+    const confirm = within(dialog).getByRole('button', { name: /Tạm dừng \d+ ngày/ });
+    fireEvent.click(confirm);
+    fireEvent.click(confirm);
+    await waitFor(() => expect(callsTo('POST', `/v1/devices/${ID}/pause`)).toHaveLength(1));
+  });
+
+  it('lỗi mạng khi tạm dừng: báo lỗi, không tưởng là đã dừng', async () => {
+    override = (c) => {
+      if (c.url.endsWith('/pause')) throw new TypeError('Failed to fetch');
+      return undefined;
+    };
+    open(`/device/${ID}`);
+    fireEvent.click(await screen.findByRole('button', { name: 'Tạm dừng cảnh báo' }));
+    const dialog = await screen.findByRole('dialog');
+    fireEvent.click(within(dialog).getByRole('button', { name: /Tạm dừng \d+ ngày/ }));
+    expect(await t(/Không kết nối được mạng/)).toBeTruthy();
+    expect(screen.queryByText(/Đang tạm dừng cảnh báo tới/)).toBeNull();
+  });
+
+  it('màn hình chính: thiết bị tạm dừng hiện huy hiệu "Tạm dừng cảnh báo" + ngày, không phải "Mất kết nối"', async () => {
+    const t0 = serverNow();
+    devices = [makeDevice({ phase: 'offline', last_seen: t0 - 5 * 3600, latest: { ts: t0 - 5 * 3600, temp_c: -19 }, paused_until: t0 + 86400 })];
+    open('/');
+    expect(await t('Tạm dừng cảnh báo')).toBeTruthy();
+    expect(screen.queryByText('Mất kết nối')).toBeNull();
+    expect(screen.getByText(/Đang tạm dừng cảnh báo tới \d\d\/\d\d/)).toBeTruthy();
+  });
+});
+
+describe('người nhận chính và lịch nhắc', () => {
+  it('người đầu tiên có nhãn "Người nhận chính", những người sau thì không; có câu giải thích', async () => {
+    recipients = [
+      { id: 1, name: 'Chủ quán', phone: '84912345678' },
+      { id: 2, name: 'Quản lý', phone: '84987654321' },
+    ];
+    open(`/device/${ID}/recipients`);
+    expect(await t('Người nhận chính')).toBeTruthy();
+    expect(screen.getAllByText('Người nhận chính')).toHaveLength(1);
+    const first = screen.getByText('Chủ quán').parentElement!;
+    const second = screen.getByText('Quản lý').parentElement!;
+    expect(first.textContent).toContain('Người nhận chính');
+    expect(second.textContent).not.toContain('Người nhận chính');
+    expect(screen.getByText('Người đầu tiên trong danh sách nhận cả tin nhắc lại; những người khác chỉ nhận tin báo đầu và tin đã ổn.')).toBeTruthy();
+  });
+
+  it('danh sách rỗng: không có nhãn, không có câu giải thích người nhận chính', async () => {
+    recipients = [];
+    open(`/device/${ID}/recipients`);
+    await t(/Chưa có người nhận cảnh báo/);
+    expect(screen.queryByText('Người nhận chính')).toBeNull();
+    expect(screen.queryByText(/Người đầu tiên trong danh sách/)).toBeNull();
+  });
+
+  it('phần trợ giúp nêu lịch nhắc thưa dần và nút "Đã biết"', async () => {
+    open(`/device/${ID}`);
+    fireEvent.click(await t('Cảnh báo hoạt động thế nào?'));
+    const help = screen.getByText(/nhắc lại thưa dần/).closest('li')!;
+    expect(help.textContent).toContain('sau 30 phút, rồi cách 2, 4, 8, 12 giờ');
+    expect(help.textContent).toContain('sau 2 giờ, rồi cách 6, 12 giờ');
+    expect(help.textContent).toContain('người nhận chính');
+    expect(help.textContent).toContain('Đã biết, đang xử lý');
   });
 });

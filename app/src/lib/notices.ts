@@ -29,6 +29,7 @@ export function deviceNotices(
   if (d.recipient_count === 0) out.push('no_recipients');
   if ((d.notify_failures_24h ?? 0) > 0) out.push('notify_failed');
   // Chưa có số đo nào thì hiển nhiên chưa bật báo động: đã có hướng dẫn cài đặt riêng, khỏi nói thêm.
-  if (d.armed === false && status !== 'no_data') out.push('not_armed');
+  // Đang tạm dừng cảnh báo thì "chờ đạt nhiệt độ" cũng không còn ý nghĩa.
+  if (d.armed === false && status !== 'no_data' && status !== 'paused') out.push('not_armed');
   return out;
 }

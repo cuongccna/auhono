@@ -1,6 +1,6 @@
 import { STATUS_LABEL, type DeviceStatus } from '../lib/status.ts';
 
-const ICON: Record<DeviceStatus, string> = { ok: '✓', alarm: '!', offline: '✕', no_data: '…', unknown: '?' };
+const ICON: Record<DeviceStatus, string> = { ok: '✓', alarm: '!', offline: '✕', no_data: '…', paused: 'II', unknown: '?' };
 
 /** Huy hiệu trạng thái: có cả chữ lẫn ký hiệu, không chỉ dựa vào màu. */
 export function StatusBadge({ status }: { status: DeviceStatus }) {

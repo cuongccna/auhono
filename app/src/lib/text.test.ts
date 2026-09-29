@@ -13,11 +13,11 @@ describe('cleanText', () => {
   });
   it('cắt khoảng trắng đầu/cuối, gộp khoảng trắng và xuống dòng thành một dấu cách', () => {
     expect(cleanText('  Tủ   kem \n\t mới  ')).toBe('Tủ kem mới');
-    expect(cleanText(' Tủ kem　')).toBe('Tủ kem');
+    expect(cleanText('\u00A0Tủ\u00A0kem\u3000')).toBe('Tủ kem');
   });
   it('bỏ ký tự vô hình / điều khiển / đổi chiều chữ (dán từ tin nhắn)', () => {
-    expect(cleanText('Tủ​ kem\u0000‮')).toBe('Tủ kem');
-    expect(cleanText('﻿Tủ kem')).toBe('Tủ kem');
+    expect(cleanText('Tủ\u200B kem\u0000\u202E')).toBe('Tủ kem');
+    expect(cleanText('\uFEFFTủ kem')).toBe('Tủ kem');
   });
   it('giữ emoji ghép (ZWJ ở giữa) nhưng bỏ ZWJ lẻ loi', () => {
     const family = '👨\u200D👩\u200D👧';
@@ -38,7 +38,7 @@ describe('validateName (giống server: 1..60 ký tự sau khi cắt)', () => {
     expect(validateName('  Tủ kem  ', empty)).toEqual({ ok: true, value: 'Tủ kem' });
   });
   it('rỗng hoặc chỉ khoảng trắng/ký tự vô hình => lỗi hướng dẫn', () => {
-    for (const raw of ['', '   ', '\n', '​​']) expect(validateName(raw, empty)).toEqual({ ok: false, error: empty });
+    for (const raw of ['', '   ', '\n', '\u200B\u200B']) expect(validateName(raw, empty)).toEqual({ ok: false, error: empty });
   });
   it('độ dài đếm SAU khi NFC: 60 ký tự dạng tổ hợp (~100 đơn vị) vẫn hợp lệ', () => {
     const name60 = 'ế'.repeat(NAME_MAX); // 60 ký tự NFC

@@ -6,6 +6,7 @@ export type ErrorCode =
   | 'bad_range'
   | 'too_many_recipients'
   | 'not_found'
+  | 'no_active_alert' // bấm "Đã biết" khi không có sự cố nào (đã ổn trong lúc chờ)
   | 'invalid_code'
   | 'unauthorized'
   | 'too_large'
@@ -26,6 +27,7 @@ const SERVER_CODES: ReadonlySet<string> = new Set<ErrorCode>([
   'bad_range',
   'too_many_recipients',
   'not_found',
+  'no_active_alert',
   'invalid_code',
   'unauthorized',
   'too_large',
@@ -50,6 +52,11 @@ export class AppError extends Error {
 
 export function isAppError(e: unknown): e is AppError {
   return e instanceof AppError;
+}
+
+/** Mã lỗi của AppError, hoặc undefined nếu không phải AppError. */
+export function errorCodeOf(e: unknown): ErrorCode | undefined {
+  return isAppError(e) ? e.code : undefined;
 }
 
 /** Request bị huỷ có chủ đích (rời màn hình): bỏ qua, không báo lỗi. */
@@ -91,13 +98,14 @@ export const ERROR_MESSAGE: Record<ErrorCode, string> = {
   too_many_recipients: 'Mỗi thiết bị chỉ có tối đa 5 người nhận cảnh báo. Hãy xóa bớt một người rồi thêm lại.',
   not_found: 'Không tìm thấy thiết bị này. Có thể thiết bị đã được gỡ khỏi tài khoản của bạn.',
   // Cố ý chung chung: server không cho biết mã sai hay thiết bị đã có chủ (để không lộ thông tin của người khác).
+  no_active_alert: 'Hiện không có sự cố nào cần ghi nhận: tủ có thể đã ổn trở lại. Bạn thử làm mới nhé.',
   invalid_code:
     'Mã không đúng, hoặc thiết bị này đang thuộc tài khoản khác. Bạn kiểm tra lại mã in trên hộp. Nếu là thiết bị đã qua sử dụng, hãy nhờ chủ cũ vào "Chi tiết thiết bị > Gỡ thiết bị" trước, hoặc liên hệ nơi bán.',
   unauthorized: 'Phiên đăng nhập Zalo đã hết hạn hoặc chưa được cho phép. Bạn bấm "Cho phép" rồi thử lại nhé.',
   too_large: 'Dữ liệu gửi đi quá lớn. Bạn thử rút gọn lại nhé.',
   rate_limited: 'Bạn thao tác hơi nhanh. Đợi một chút rồi thử lại nhé.',
   too_many_attempts:
-    'Bạn đã nhập sai mã quá nhiều lần nên tạm thời bị khóa. Hãy đợi vài phút rồi thử lại. Nếu mã in trên hộp đúng mà vẫn báo lỗi, liên hệ nơi bán để được hỗ trợ.',
+    'Bạn đã nhập sai mã quá nhiều lần nên tạm thời bị khóa (có thể tới khoảng 1 giờ). Hãy kiểm tra kỹ mã in trên hộp rồi thử lại sau. Nếu mã đúng mà vẫn báo lỗi, liên hệ nơi bán để được hỗ trợ.',
   auth_unavailable: 'Zalo đang bận, chưa kiểm tra được tài khoản của bạn. Bạn thử lại sau ít phút nhé.',
   internal: 'Hệ thống đang gặp sự cố. Bạn thử lại sau ít phút nhé.',
   auth_required: 'Ứng dụng cần được phép dùng tài khoản Zalo của bạn. Bạn bấm "Cho phép" nhé.',

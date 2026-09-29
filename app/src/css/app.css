@@ -213,6 +213,7 @@ body {
 .auh-badge-alarm { background: var(--auh-alarm-bg); color: var(--auh-alarm); }
 .auh-badge-offline { background: var(--auh-off-bg); color: var(--auh-off); }
 .auh-badge-no_data,
+.auh-badge-paused,
 .auh-badge-unknown { background: var(--auh-neutral-bg); color: var(--auh-muted); }
 
 /* Thẻ thiết bị ở màn hình chính */
@@ -339,6 +340,10 @@ body {
   font-size: 14px;
   line-height: 19px;
 }
+.auh-card-note-info {
+  background: var(--auh-info-bg);
+  color: var(--auh-info);
+}
 .auh-list {
   margin: 8px 0 0;
   padding-left: 20px;
@@ -366,4 +371,32 @@ main, .auh-card { overflow-wrap: break-word; }
 }
 @media (prefers-reduced-motion: reduce) {
   * { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}
+
+/* Chọn số ngày tạm dừng */
+.auh-days {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 8px;
+}
+.auh-day {
+  min-height: var(--auh-tap);
+  padding: 8px 4px;
+  text-align: center;
+}
+.auh-day strong { margin: 0; font-size: 20px; }
+@media (max-width: 359px) {
+  .auh-days { grid-template-columns: repeat(3, 1fr); }
+}
+
+.auh-tag {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--auh-info-bg);
+  color: var(--auh-info);
+  font-size: 13px;
+  font-weight: 600;
+  vertical-align: 2px;
 }

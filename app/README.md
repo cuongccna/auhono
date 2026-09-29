@@ -6,10 +6,10 @@
 |---|---|---|
 | Thiết bị của tôi | `/` | Danh sách thiết bị, nhiệt độ mới nhất, trạng thái (Bình thường / Đang báo động / Mất kết nối / Chưa có dữ liệu), cảnh báo cấu hình (chưa có người nhận, gửi tin lỗi, chưa bật báo động). Tự làm mới mỗi 60 giây khi đang xem |
 | Kích hoạt | `/activate` | Quét QR trên hộp (hoặc nhập tay mã thiết bị + mã kích hoạt, hoặc dán cả đường dẫn QR), chọn Tủ đông / Tủ mát, đặt tên |
-| Chi tiết + biểu đồ 24 giờ | `/device/:id` | Biểu đồ SVG (dải ngưỡng, dải min–max, đứt đường + gạch chéo khi mất kết nối > 15 phút, hình thoi cho điểm ngoài ngưỡng, trục giờ Việt Nam), hướng dẫn cài đặt khi chưa có số đo, giải thích cách cảnh báo hoạt động, gỡ thiết bị (có bước xác nhận) |
+| Chi tiết + biểu đồ 24 giờ | `/device/:id` | Biểu đồ SVG (dải ngưỡng, dải min–max, đứt đường + gạch chéo khi mất kết nối > 15 phút, hình thoi cho điểm ngoài ngưỡng, trục giờ Việt Nam), hướng dẫn cài đặt khi chưa có số đo, giải thích cách cảnh báo hoạt động, nút "Đã biết, đang xử lý" (dừng tin nhắc lại vài giờ), "Tạm dừng cảnh báo" 1/3/7/14/30 ngày + "Bật lại", gỡ thiết bị (có bước xác nhận) |
 | Đổi tên | `/device/:id/rename` | Đổi tên thiết bị (chuẩn hóa NFC, 1–60 ký tự) |
 | Đặt ngưỡng | `/device/:id/thresholds` | Hiện nhiệt độ hiện tại của tủ; chọn loại tủ có sẵn ngưỡng; mục "Nâng cao" chỉnh min/max (gõ được `-18,5`, `−18`, số toàn chiều rộng) và số phút báo (5–60); cảnh báo khi nhiệt độ hiện tại đã nằm ngoài ngưỡng định đặt |
-| Người nhận cảnh báo | `/device/:id/recipients` | Xem / thêm / xóa (tối đa 5), số điện thoại di động VN tự chuẩn hóa về `84xxxxxxxxx`, chặn trùng, cảnh báo khi xóa người cuối cùng |
+| Người nhận cảnh báo | `/device/:id/recipients` | Xem / thêm / xóa (tối đa 5), nhãn "Người nhận chính" cho người đầu tiên, số điện thoại di động VN tự chuẩn hóa về `84xxxxxxxxx`, chặn trùng, cảnh báo khi xóa người cuối cùng |
 
 API mà app gọi là nhóm "Chủ quán" trong `server/src/app.ts` (Bearer = Zalo access token).
 
@@ -154,8 +154,24 @@ Mọi dòng "Test" là test tự động trong Node/jsdom (SDK và `fetch` giả
 | Mất kết nối / đang báo động | Mất kết nối: giờ nhận số đo cuối + "chưa chắc là tủ hỏng: mất điện, Wi-Fi, đứt dây đầu dò". Báo động: nóng/lạnh hơn ngưỡng nào, nhiệt độ hiện tại, "từ khoảng HH:MM" (suy từ biểu đồ) | `scenarios.test.tsx`, `chart.test.ts` |
 | Cảnh báo đến chậm | Trợ giúp "Cảnh báo hoạt động thế nào?" (ngưỡng liên tục N phút, mất kết nối sau 15 phút, nhắc lại, tủ mới chưa bật, người nhận cần có Zalo/chặn OA) ở màn hình chính và chi tiết | `scenarios.test.tsx` |
 | Số điện thoại | `0912345678`, `+84 (0) 912…`, `0084…`, số toàn chiều rộng => `84912345678`; số bàn / 11 số cũ / thiếu / thừa số => câu giải thích riêng; trùng bị chặn; tối đa 5; xóa người cuối => cảnh báo trước và sau; nhắc người nhận cần có Zalo | `phone.test.ts`, `scenarios.test.tsx` |
+| Sự cố kéo dài, tốn tin nhắn (~220đ/tin) | Nút **"Đã biết, đang xử lý"** (POST `/ack` {hours: 4}) CHỈ hiện khi `phase` khác `ok`, chưa tạm dừng và `acked_until` trống/đã qua; sau khi bấm hiện "Đã ghi nhận, sẽ nhắc lại sau HH:mm nếu chưa xong."; 409 `no_active_alert` => thông báo riêng + tải lại; server cũ (thiếu `acked_until`) => không hiện nút | `alert-actions.test.ts`, `api-client.test.ts`, `scenarios.test.tsx` |
+| Quán nghỉ Tết / cố ý rút điện | Mục **"Tạm dừng cảnh báo"**: chọn 1/3/7/14/30 ngày, hộp thoại xác nhận "Trong thời gian này bạn sẽ KHÔNG nhận cảnh báo…"; sau đó biểu ngữ "Đang tạm dừng cảnh báo tới dd/MM" + nút "Bật lại"; trạng thái là **"Tạm dừng cảnh báo"**, KHÔNG hiện "Mất kết nối" như sự cố (cả ở màn hình chính); tạm dừng hết hạn thì tính bình thường; server cũ (thiếu `paused_until`) => ẩn mục này | `status.test.ts`, `alert-actions.test.ts`, `scenarios.test.tsx` |
+| Nhiều người nhận, nhắc lại thưa | Người đầu tiên có nhãn "Người nhận chính" + giải thích "Người đầu tiên trong danh sách nhận cả tin nhắc lại; những người khác chỉ nhận tin báo đầu và tin đã ổn."; trợ giúp nêu lịch nhắc (nhiệt độ: sau 30 phút rồi cách 2/4/8/12 giờ; mất kết nối: sau 2 giờ rồi cách 6/12 giờ). "Người đầu" được SUY từ thứ tự danh sách của server (sắp theo id) | `scenarios.test.tsx` |
 | Lỗi lập trình bất ngờ | `ErrorBoundary`: "Ứng dụng gặp sự cố" + nút mở lại thay vì màn hình trắng | `scenarios.test.tsx` |
 | Tên/chuỗi độc hại từ server | Chỉ hiển thị dạng chữ | `scenarios.test.tsx`, `security.test.ts` |
+
+## Hợp đồng server mà app dựa vào (và khi vắng mặt thì sao)
+
+| Trường / endpoint | App dùng để | Server cũ (vắng mặt) |
+|---|---|---|
+| `server_time` (GET `/v1/devices`, `/readings`) | Đồng hồ theo giờ server (mất kết nối, "x phút trước", cửa sổ biểu đồ) | Dùng giờ điện thoại |
+| `armed`, `recipient_count`, `notify_failures_24h` | Cảnh báo cấu hình trên màn hình chính/chi tiết/người nhận | Không hiện gì |
+| `paused_until`, `acked_until`, `claimed_at` | Trạng thái "Tạm dừng", nút "Đã biết", giờ kích hoạt | Ẩn nút/mục tương ứng |
+| POST `/v1/devices/:id/ack` `{hours}`, POST/DELETE `/v1/devices/:id/pause` `{days}` | Nút "Đã biết", "Tạm dừng"/"Bật lại" | Không gọi |
+| 401 `unauthorized` | Luồng xin quyền lại ("Cho phép") | — |
+| 503 `auth_unavailable` | "Zalo đang bận, thử lại sau ít phút"; giữ số cũ; KHÔNG xin quyền lại | Coi như lỗi hệ thống chung |
+| 429 `too_many_attempts` (claim) | Thông báo bị khóa (tới ~1 giờ) + nút gửi tạm khóa 30 giây | 429 chung => "thao tác hơi nhanh" |
+| 409 `no_active_alert` (ack) | "Không có sự cố nào cần ghi nhận" + tải lại | 409 chung => "Có lỗi xảy ra" |
 
 ## Chưa xác minh trong Zalo thật
 
@@ -170,7 +186,7 @@ Toàn bộ kiểm thử ở trên chạy trong Node/jsdom với `zmp-sdk` và `f
 - Độ chính xác hiệu chỉnh đồng hồ trên 3G thật (dùng điểm giữa lúc gửi và lúc nhận; sai số tối đa bằng nửa độ trễ khứ hồi).
 - Màu chủ đạo thật `--zaui-light-color-primary` của Zalo (test độ tương phản dùng màu dự phòng `#006af5`).
 - Origin thật của Mini App phía CORS, `Retry-After`/`Cache-Control` của Cloudflare, tin ZNS thật tới người nhận.
-- Bundle: 117,9 kB gzip cho JS (`vite build`, đo lúc viết); tải thật trên Zalo có thể khác do CDN của Zalo.
+- Bundle: 119,9 kB gzip cho JS (`vite build`, đo lúc viết); tải thật trên Zalo có thể khác do CDN của Zalo.
 
 ## Kiểm thử thủ công trong Zalo thật (checklist)
 
@@ -204,6 +220,10 @@ trên cả Android và iOS, ít nhất một máy Zalo bản mới và một má
 - [ ] Tắt mạng điện thoại 20 phút rồi bật lại: thiết bị KHÔNG bị hiện "Mất kết nối" oan.
 - [ ] VoiceOver/TalkBack đọc được tóm tắt biểu đồ.
 
+**Đã biết / tạm dừng**
+- [ ] Khi có báo động thật: nút "Đã biết, đang xử lý" hiện; bấm xong nút biến mất và tin nhắc lại ngừng tới giờ hẹn (kiểm tra số tin nhận được).
+- [ ] Tạm dừng 1 ngày rồi rút điện thiết bị: không có tin nào, màn hình hiện "Tạm dừng cảnh báo"; "Bật lại" hoạt động; hết hạn tự bật lại.
+
 **Ngưỡng & người nhận**
 - [ ] Chọn Tủ đông / Tủ mát rồi Lưu: ngưỡng mới hiện ở chi tiết thiết bị và server áp dụng.
 - [ ] "Nâng cao": nhập -18,5 (dấu phẩy), số sai, min ≥ max, phút ngoài 5–60 => báo lỗi đúng ô, không gửi lên server.
@@ -221,13 +241,14 @@ trên cả Android và iOS, ít nhất một máy Zalo bản mới và một má
 
 ## Kích thước bản build
 
-`npm run build` (Vite 5, target es2015): JS **117,9 kB gzip** (377 kB thô), CSS 16,3 kB gzip (đo lúc viết, sau khi thêm tự làm mới, đổi tên, chế độ tối...). Phần lớn là react-dom, react-router, `zmp-ui` (và `zod` do `zmp-sdk` kéo vào)
+`npm run build` (Vite 5, target es2015): JS **119,9 kB gzip** (383,6 kB thô), CSS 16,4 kB gzip (đo lúc viết, sau khi thêm tự làm mới, đổi tên, tạm dừng, chế độ tối...). Phần lớn là react-dom, react-router, `zmp-ui` (và `zod` do `zmp-sdk` kéo vào)
 cùng toàn bộ `zaui.css` (import nguyên tệp; có thể thu nhỏ sau bằng cách chỉ nạp phần CSS của các component đang dùng). Ngân sách đặt ra: JS gzip dưới ~130 kB.
 
 ## Hạn chế và việc còn lại
 
 - **Mỗi thiết bị chỉ thuộc một tài khoản Zalo** (theo server). Người nhà chỉ nhận được tin cảnh báo (được thêm làm "người nhận"), không xem được biểu đồ bằng tài khoản riêng. Chưa làm chia sẻ.
 - Không có nút "chuyển thiết bị cho người khác" mà không cần chủ cũ: nếu chủ cũ không còn liên lạc được, phải nhờ nơi bán gỡ phía server.
+- "Người nhận chính" được SUY từ thứ tự danh sách (người đầu tiên); server chưa trả cờ `is_primary` và chưa có cách đổi người nhận chính ngoài việc xóa rồi thêm lại.
 - Trang chi tiết phải tải cả danh sách thiết bị rồi lọc (server chưa có `GET /v1/devices/:id`); "vượt ngưỡng từ khi nào" được SUY từ biểu đồ 24 giờ (server chưa trả thời điểm bắt đầu báo động).
 - Chưa xem lịch sử > 7 ngày (`/v1/devices/:id/history`).
 - Chế độ tối đã làm nhưng chưa kiểm chứng trong Zalo (xem mục trên).

@@ -116,10 +116,11 @@ export default function RecipientsPage() {
             <strong>Chưa có người nhận cảnh báo — sẽ không có tin nhắn nào được gửi.</strong> Hãy thêm số điện thoại của bạn hoặc người trông quán.
           </div>
         )}
-        {recipients?.map((r) => (
+        {recipients?.map((r, index) => (
           <div key={r.id} className="auh-list-item">
             <div className="auh-grow">
               <strong className="auh-name">{r.name}</strong>
+              {index === 0 && <span className="auh-tag">Người nhận chính</span>}
               <div className="auh-muted" style={{ margin: 0 }}>{formatPhone(r.phone)}</div>
             </div>
             <button
@@ -133,6 +134,12 @@ export default function RecipientsPage() {
             </button>
           </div>
         ))}
+        {recipients && recipients.length > 0 && (
+          <p className="auh-help">
+            <strong>Người đầu tiên trong danh sách nhận cả tin nhắc lại; những người khác chỉ nhận tin báo đầu và tin đã ổn.</strong> Muốn đổi người nhận chính,
+            hãy xóa người đầu rồi thêm lại người đó (sẽ nằm cuối danh sách).
+          </p>
+        )}
         <p className="auh-help">
           Tin cảnh báo gửi qua Zalo tới số điện thoại này, nên người nhận cần có Zalo dùng đúng số đó. Tin có thể không tới nếu họ đã chặn tài khoản Auhono.
           Bạn nên thêm cả số của chính mình. Mỗi thiết bị chỉ thuộc một tài khoản Zalo; người nhà muốn nhận cảnh báo thì thêm số của họ ở đây.

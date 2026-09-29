@@ -7,6 +7,7 @@ import { Screen } from '../components/screen.tsx';
 import { StatusBadge } from '../components/status-badge.tsx';
 import { isApiConfigured } from '../config.ts';
 import { POLL_MS, useAsync, useNow } from '../hooks.ts';
+import { pausedBanner } from '../lib/alert-actions.ts';
 import { formatAgo, formatTemp, formatVnTime } from '../lib/format.ts';
 import { deviceNotices, NOTICE_TEXT } from '../lib/notices.ts';
 import { deviceStatus, STATUS_LABEL } from '../lib/status.ts';
@@ -50,7 +51,7 @@ export default function HomePage() {
       )}
 
       {devices?.map((d) => {
-        const status = deviceStatus({ phase: d.phase, lastSeen: d.last_seen, nowSeconds: asOf });
+        const status = deviceStatus({ phase: d.phase, lastSeen: d.last_seen, nowSeconds: asOf, pausedUntil: d.paused_until });
         const notices = deviceNotices(d, status);
         return (
           <button
@@ -71,6 +72,7 @@ export default function HomePage() {
                 {d.latest ? `${status === 'offline' ? 'Số đo cuối' : 'Cập nhật'} ${formatAgo(now, d.latest.ts)}` : 'Chưa có số đo'}
               </span>
             </div>
+            {status === 'paused' && d.paused_until != null && <div className="auh-card-note auh-card-note-info">{pausedBanner(d.paused_until)}</div>}
             {notices.map((n) => (
               <div key={n} className="auh-card-note">
                 <span aria-hidden="true">⚠ </span>

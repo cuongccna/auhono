@@ -405,3 +405,71 @@ describe('đồng hồ theo giờ server', () => {
     expect(onServerTime).not.toHaveBeenCalled();
   });
 });
+
+describe('ack / pause / resume', () => {
+  it('ackDevice: POST /ack {hours} (mặc định 4) và trả mốc acked_until', async () => {
+    const f = vi.fn<typeof fetch>(async () => jsonRes({ ok: true, acked_until: 1_800_014_400 }));
+    expect(await client(f).ackDevice('AUH-000001')).toBe(1_800_014_400);
+    const [url, init] = f.mock.calls[0]!;
+    expect(url).toBe(`${BASE}/v1/devices/AUH-000001/ack`);
+    expect(init!.method).toBe('POST');
+    expect(JSON.parse(init!.body as string)).toEqual({ hours: 4 });
+    await client(f).ackDevice('AUH-000001', 24);
+    expect(JSON.parse(f.mock.calls[1]![1]!.body as string)).toEqual({ hours: 24 });
+  });
+
+  it('ackDevice: số giờ bị kẹp vào 1..24 (server từ chối ngoài khoảng), số rác => 4', async () => {
+    const f = vi.fn<typeof fetch>(async () => jsonRes({ ok: true, acked_until: 1_800_014_400 }));
+    const c = client(f);
+    for (const h of [0, -3, 99, NaN, 2.9]) await c.ackDevice('AUH-000001', h);
+    expect(f.mock.calls.map((x) => JSON.parse(x[1]!.body as string).hours)).toEqual([4, 1, 24, 4, 2]);
+  });
+
+  it('ackDevice: 409 no_active_alert => mã riêng; không thử lại (POST)', async () => {
+    const f = vi.fn<typeof fetch>(async () => jsonRes({ error: 'no_active_alert' }, 409));
+    expect(await codeOf(client(f).ackDevice('AUH-000001'))).toBe('no_active_alert');
+    expect(f).toHaveBeenCalledTimes(1);
+  });
+
+  it('ackDevice: phản hồi thiếu acked_until => bad_response', async () => {
+    const f = vi.fn<typeof fetch>(async () => jsonRes({ ok: true }));
+    expect(await codeOf(client(f).ackDevice('AUH-000001'))).toBe('bad_response');
+  });
+
+  it('pauseDevice: POST /pause {days} kẹp 1..60, trả paused_until', async () => {
+    const f = vi.fn<typeof fetch>(async () => jsonRes({ ok: true, paused_until: 1_800_259_200 }));
+    const c = client(f);
+    expect(await c.pauseDevice('AUH-000001', 3)).toBe(1_800_259_200);
+    await c.pauseDevice('AUH-000001', 0);
+    await c.pauseDevice('AUH-000001', 500);
+    await c.pauseDevice('AUH-000001', 30);
+    expect(f.mock.calls[0]![0]).toBe(`${BASE}/v1/devices/AUH-000001/pause`);
+    expect(f.mock.calls.map((x) => JSON.parse(x[1]!.body as string).days)).toEqual([3, 1, 60, 30]);
+  });
+
+  it('resumeDevice: DELETE /pause', async () => {
+    const f = vi.fn<typeof fetch>(async () => jsonRes({ ok: true }));
+    await client(f).resumeDevice('AUH-000001');
+    const [url, init] = f.mock.calls[0]!;
+    expect(url).toBe(`${BASE}/v1/devices/AUH-000001/pause`);
+    expect(init!.method).toBe('DELETE');
+    expect(init!.body).toBeUndefined();
+  });
+
+  it('các lệnh ghi này KHÔNG tự thử lại khi lỗi mạng (người dùng bấm lại được, gọi lại an toàn)', async () => {
+    const f = vi.fn<typeof fetch>(async () => {
+      throw new TypeError('Failed to fetch');
+    });
+    const c = client(f);
+    expect(await codeOf(c.ackDevice('AUH-000001'))).toBe('network');
+    expect(await codeOf(c.pauseDevice('AUH-000001', 3))).toBe('network');
+    expect(await codeOf(c.resumeDevice('AUH-000001'))).toBe('network');
+    expect(f).toHaveBeenCalledTimes(3);
+  });
+
+  it('mã thiết bị được encode trong đường dẫn', async () => {
+    const f = vi.fn<typeof fetch>(async () => jsonRes({ ok: true, acked_until: 1_800_014_400 }));
+    await client(f).ackDevice('a/b');
+    expect(f.mock.calls[0]![0]).toBe(`${BASE}/v1/devices/a%2Fb/ack`);
+  });
+});

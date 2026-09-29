@@ -109,3 +109,15 @@ describe('hợp đồng server mới', () => {
     expect(mapHttpError(400, { error: 'aborted' }).code).toBe('bad_request');
   });
 });
+
+describe('ack / pause', () => {
+  it('409 no_active_alert (bấm "Đã biết" khi sự cố đã hết) => thông điệp riêng dễ hiểu', () => {
+    const err = mapHttpError(409, { error: 'no_active_alert' });
+    expect(err.code).toBe('no_active_alert');
+    expect(errorMessage(err)).toContain('không có sự cố nào');
+    expect(needsAuth(err)).toBe(false);
+  });
+  it('429 too_many_attempts nói rõ có thể bị khóa tới ~1 giờ', () => {
+    expect(errorMessage(new AppError('too_many_attempts'))).toContain('1 giờ');
+  });
+});

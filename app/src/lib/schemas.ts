@@ -27,6 +27,12 @@ export interface Device {
   recipient_count?: number;
   /** Số lần gửi tin thất bại trong 24 giờ qua. Vắng mặt = server cũ. */
   notify_failures_24h?: number;
+  /** Đang tạm dừng cảnh báo tới mốc này (Unix giây); null = không tạm dừng. Vắng mặt = server cũ. */
+  paused_until?: number | null;
+  /** Chủ quán đã bấm "Đã biết": không nhắc lại tới mốc này; null = chưa. Vắng mặt = server cũ. */
+  acked_until?: number | null;
+  /** Lúc kích hoạt (Unix giây). Vắng mặt = server cũ. */
+  claimed_at?: number | null;
 }
 
 export interface Readings {
@@ -74,6 +80,9 @@ function numOrNull(o: Obj, k: string): number | null {
   return v === null || v === undefined ? null : isNum(v) ? v : bad();
 }
 
+/** Mốc thời gian: số dương hữu hạn, hoặc null; khác thì undefined (trường mới sai kiểu không được làm hỏng cả thiết bị). */
+const optTs = (v: unknown): number | null | undefined => (v === null ? null : typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : undefined);
+
 /** Số nguyên không âm hợp lệ, nếu không thì undefined (trường mới: không được làm hỏng cả thiết bị). */
 const optCount = (v: unknown): number | undefined => (typeof v === 'number' && Number.isInteger(v) && v >= 0 ? v : undefined);
 
@@ -99,6 +108,9 @@ export function parseDevice(v: unknown): Device {
     ...(typeof o.armed === 'boolean' ? { armed: o.armed } : {}),
     ...(optCount(o.recipient_count) !== undefined ? { recipient_count: optCount(o.recipient_count)! } : {}),
     ...(optCount(o.notify_failures_24h) !== undefined ? { notify_failures_24h: optCount(o.notify_failures_24h)! } : {}),
+    ...(optTs(o.paused_until) !== undefined ? { paused_until: optTs(o.paused_until)! } : {}),
+    ...(optTs(o.acked_until) !== undefined ? { acked_until: optTs(o.acked_until)! } : {}),
+    ...(optTs(o.claimed_at) !== undefined ? { claimed_at: optTs(o.claimed_at)! } : {}),
   };
 }
 
@@ -155,6 +167,14 @@ export function parseRecipientList(v: unknown): Recipient[] {
   const o = obj(v);
   if (!Array.isArray(o.recipients)) return bad();
   return parseRows(o.recipients.slice(0, MAX_RECIPIENTS_PARSED), parseRecipient);
+}
+
+/** Phản hồi `{ ok: true, <field>: <Unix giây> }` (ack → acked_until, pause → paused_until). Thiếu/sai mốc thời gian => bad_response. */
+export function parseOkUntil(v: unknown, field: 'acked_until' | 'paused_until'): number {
+  const o = obj(v);
+  if (o.ok !== true) return bad();
+  const t = o[field];
+  return isNum(t) && t > 0 ? t : bad();
 }
 
 /** Phản hồi chỉ cần biết là `{ ok: true }`. */
